@@ -13,7 +13,7 @@ import {
   type ChartProps,
 } from "./explorer/ExplorerCharts";
 import { buildSeries, PALETTE, SINGLE_GROUP } from "./explorer/explorerModel";
-import { MetricSelect } from "./metrics";
+import { groupMetrics, MetricSelect } from "./metrics";
 
 interface ExplorerViewProps {
   points: RunPoint[];
@@ -35,6 +35,7 @@ export function ExplorerView({ points }: ExplorerViewProps) {
 
   const [xId, setXId] = useState("");
   const [yId, setYId] = useState("");
+  const [y2Id, setY2Id] = useState("");
   const [colorId, setColorId] = useState("");
   const [chartType, setChartType] = useState<ChartType>("auto");
 
@@ -53,13 +54,20 @@ export function ExplorerView({ points }: ExplorerViewProps) {
     colorId && colorId !== activeX && varying.some((f) => f.id === colorId)
       ? colorId
       : "";
+  // Secondary Y is optional and must differ from the primary Y. We allow any
+  // metric that survives the active-columns filter.
+  const activeY2 =
+    y2Id && y2Id !== activeY && metrics.some((metric) => metric.id === y2Id)
+      ? y2Id
+      : "";
 
   useEffect(() => {
     if (xId !== activeX) setXId(activeX);
     if (yId !== activeY) setYId(activeY);
     if (colorId !== activeColor) setColorId(activeColor);
+    if (y2Id !== activeY2) setY2Id(activeY2);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeX, activeY, activeColor]);
+  }, [activeX, activeY, activeColor, activeY2]);
 
   const xFactor = getFactorById(activeX) ?? null;
   const colorFactor = activeColor ? getFactorById(activeColor) ?? null : null;
@@ -67,6 +75,12 @@ export function ExplorerView({ points }: ExplorerViewProps) {
   const series = useMemo(
     () => (xFactor ? buildSeries(points, xFactor, activeY, colorFactor) : null),
     [points, xFactor, activeY, colorFactor],
+  );
+  // Secondary series: no color split (single group) so the dashed overlay stays
+  // readable — even when the primary chart is colored by a factor.
+  const series2 = useMemo(
+    () => (xFactor && activeY2 ? buildSeries(points, xFactor, activeY2, null) : null),
+    [points, xFactor, activeY2],
   );
 
   if (points.length === 0) {
@@ -86,6 +100,12 @@ export function ExplorerView({ points }: ExplorerViewProps) {
       ? `${yMetric.label} (${yMetric.unit})`
       : yMetric.label
     : activeY;
+  const y2Metric = activeY2 ? metrics.find((metric) => metric.id === activeY2) : null;
+  const y2Label = y2Metric
+    ? y2Metric.unit
+      ? `${y2Metric.label} (${y2Metric.unit})`
+      : y2Metric.label
+    : activeY2;
 
   const effectiveType: Exclude<ChartType, "auto"> =
     chartType === "auto" ? (series.xIsNumeric ? "trend" : "bars") : chartType;
@@ -102,6 +122,8 @@ export function ExplorerView({ points }: ExplorerViewProps) {
     yAxisLabel: yLabel,
     colorFactor,
     colorOf,
+    series2,
+    y2AxisLabel: y2Label,
   };
 
   return (
@@ -127,6 +149,28 @@ export function ExplorerView({ points }: ExplorerViewProps) {
             onChange={setYId}
             value={activeY}
           />
+        </Field>
+        <Field label="Y secondaire (axe droit)">
+          <select
+            className="h-9 rounded border border-line bg-white px-2 text-sm font-medium"
+            onChange={(event) => setY2Id(event.target.value)}
+            value={activeY2}
+            title="Ajoute une 2e courbe en pointillés sur un axe Y à droite — utile pour visualiser un trade-off (ex. débit vs capacité de stockage)."
+          >
+            <option value="">— aucune —</option>
+            {groupMetrics(metrics.filter((metric) => metric.id !== activeY)).map(
+              (section) => (
+                <optgroup key={section.group} label={section.group}>
+                  {section.items.map((metric) => (
+                    <option key={metric.id} value={metric.id}>
+                      {metric.label}
+                      {metric.unit ? ` (${metric.unit})` : ""}
+                    </option>
+                  ))}
+                </optgroup>
+              ),
+            )}
+          </select>
         </Field>
         <Field label="Comparer par">
           <select
@@ -166,6 +210,20 @@ export function ExplorerView({ points }: ExplorerViewProps) {
 
       <section className="min-h-0 rounded-lg border border-line bg-white p-3 shadow-sm">
         {colorFactor ? <Legend series={series} colorOf={colorOf} colorFactor={colorFactor} /> : null}
+        {series2 && y2Metric ? (
+          <div className="mb-1 flex items-center gap-1.5 text-xs text-amber-700">
+            <span
+              aria-hidden
+              className="inline-block h-0.5 w-6"
+              style={{
+                background:
+                  "repeating-linear-gradient(to right, #d97706 0 5px, transparent 5px 9px)",
+              }}
+            />
+            <span className="font-medium">Axe droit (pointillés) :</span>
+            <span>{y2Label}</span>
+          </div>
+        ) : null}
         <div className="h-[calc(100%-1.75rem)] min-h-[280px]">
           {effectiveType === "trend" ? (
             series.xIsNumeric ? (

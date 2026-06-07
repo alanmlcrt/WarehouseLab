@@ -17,9 +17,15 @@ import {
   WAREHOUSE_SIZE_PRESETS,
   MAX_SEEDS,
   MIN_SEEDS,
+  applyConfoundLocks,
   buildDefaultLabPlan,
+  computeLockedFactors,
   countPlanRuns,
+  ensureRequiredFactorValues,
   getFactorById,
+  isRequiredFactor,
+  maxRobotsForArea,
+  type ConfoundRule,
   type FactorDef,
   type FactorRole,
   type FactorValue,
@@ -41,18 +47,124 @@ interface PlanEditorProps {
 
 type Zone = "context" | "variable" | "shelf";
 
+// ---------------------------------------------------------------------------
+// UI categorisation — display factors grouped by domain (storage, robots,
+// energy, etc.) rather than as a flat list. The underlying `factor.group`
+// is too coarse ("Robots" lumps energy + reliability), so we override here.
+// ---------------------------------------------------------------------------
+
+const CATEGORY_ORDER: readonly string[] = [
+  "Entrepôt",
+  "Stockage",
+  "Demande",
+  "Flotte robots",
+  "Énergie",
+  "Fiabilité",
+  "Mouvement & routage",
+];
+
+const ENERGY_IDS = new Set([
+  "maxBattery",
+  "rechargeThreshold",
+  "rechargeTicks",
+  "energyPerCell",
+  "chargingStationCount",
+]);
+const RELIABILITY_IDS = new Set(["failureProbability", "meanFailureTicks"]);
+
+function categoryOf(factor: FactorDef): string {
+  if (factor.group === "Robots") {
+    if (ENERGY_IDS.has(factor.id)) return "Énergie";
+    if (RELIABILITY_IDS.has(factor.id)) return "Fiabilité";
+    return "Flotte robots";
+  }
+  if (factor.group === "Warehouse") {
+    // Chargers conceptually belong to "Énergie" even though they live on the
+    // warehouse layout side — they're the power-supply infrastructure.
+    if (ENERGY_IDS.has(factor.id)) return "Énergie";
+    return "Entrepôt";
+  }
+  if (factor.group === "Demand") return "Demande";
+  if (factor.group === "Storage") return "Stockage";
+  if (factor.group === "Movement") return "Mouvement & routage";
+  return factor.group;
+}
+
+function groupByCategory(
+  factors: FactorDef[],
+): Array<{ category: string; items: FactorDef[] }> {
+  const map = new Map<string, FactorDef[]>();
+  for (const factor of factors) {
+    const cat = categoryOf(factor);
+    const arr = map.get(cat);
+    if (arr) arr.push(factor);
+    else map.set(cat, [factor]);
+  }
+  // Stable ordering: known categories first in the canonical order, then any
+  // leftovers alphabetically (defensive — shouldn't trigger today).
+  const known = CATEGORY_ORDER.filter((cat) => map.has(cat));
+  const rest = [...map.keys()]
+    .filter((cat) => !CATEGORY_ORDER.includes(cat))
+    .sort();
+  return [...known, ...rest].map((cat) => ({
+    category: cat,
+    items: map.get(cat) ?? [],
+  }));
+}
+
 export function PlanEditor({
   plan,
   isRunning,
   progress,
   error,
   resultsCount,
-  onChange,
+  onChange: rawOnChange,
   onRun,
   onClear,
 }: PlanEditorProps) {
   const [helpFactorId, setHelpFactorId] = useState<string | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+
+  // Confound locks + required-factor invariant: applied after every mutation so
+  // the UI cannot end up with a varied confounder or a required factor that
+  // has no value (e.g. dragged into the shelf by mistake).
+  const onChange = (next: LabPlan) =>
+    rawOnChange(ensureRequiredFactorValues(applyConfoundLocks(next)));
+
+  // Mount-time normalisation: catches saved campaigns that predate the rules.
+  useEffect(() => {
+    const normalised = ensureRequiredFactorValues(applyConfoundLocks(plan));
+    if (normalised !== plan) rawOnChange(normalised);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const lockedFactors = useMemo(() => computeLockedFactors(plan), [plan]);
+  const isLocked = (factorId: string): boolean => lockedFactors.has(factorId);
+
+  // Density clamp advisory: if the largest requested robotCount exceeds the
+  // capacity of the smallest warehouse being tested, the engine will cap it and
+  // those high values collapse onto the cap. Warn so the user isn't surprised
+  // to see robotCount levels "missing" in the results.
+  const robotClampWarning = useMemo(() => {
+    const robotBinding = plan.bindings.find((b) => b.factorId === "robotCount");
+    const sizeBinding = plan.bindings.find((b) => b.factorId === "warehouseSize");
+    const maxRobots = Math.max(
+      0,
+      ...(robotBinding?.values ?? []).map((v) => Number(v)).filter(Number.isFinite),
+    );
+    if (maxRobots <= 0) return null;
+    const sizes = sizeBinding?.values.length ? sizeBinding.values : ["s"];
+    let worst: { size: string; cap: number } | null = null;
+    for (const size of sizes) {
+      const preset = WAREHOUSE_SIZE_PRESETS[String(size)];
+      if (!preset) continue;
+      const cap = maxRobotsForArea(preset.width, preset.height);
+      if (!worst || cap < worst.cap) worst = { size: preset.label.trim(), cap };
+    }
+    if (worst && maxRobots > worst.cap) {
+      return { cap: worst.cap, size: worst.size, requested: maxRobots };
+    }
+    return null;
+  }, [plan]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -111,6 +223,11 @@ export function PlanEditor({
   const moveFactor = (factorId: string, zone: Zone) => {
     const factor = getFactorById(factorId);
     if (!factor) {
+      return;
+    }
+    // Required factors must always carry a value — refuse the shelf drop.
+    // The user still sees the card stay where it was, no error popup needed.
+    if (zone === "shelf" && isRequiredFactor(factorId)) {
       return;
     }
     const current = bindingsById.get(factorId)?.values ?? [];
@@ -292,6 +409,19 @@ export function PlanEditor({
             {error}
           </div>
         ) : null}
+        {lockedFactors.size > 0 ? (
+          <LockBanner lockedFactors={lockedFactors} />
+        ) : null}
+        {robotClampWarning ? (
+          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 lg:col-span-2">
+            <span className="mr-1 text-amber-700">⚠</span>
+            <span className="font-semibold">Densité robots plafonnée :</span> sur l'entrepôt{" "}
+            <span className="font-medium">{robotClampWarning.size}</span>, le moteur limite à{" "}
+            <span className="font-medium tabular-nums">{robotClampWarning.cap}</span> robots
+            (1 pour 4 cellules). Tes valeurs au-dessus de {robotClampWarning.cap} seront
+            ramenées à ce plafond — elles apparaîtront fusionnées dans les résultats.
+          </div>
+        ) : null}
       </div>
 
       {/* Drag board ----------------------------------------------------- */}
@@ -301,25 +431,63 @@ export function PlanEditor({
         onDragEnd={onDragEnd}
         onDragCancel={() => setDraggingId(null)}
       >
-        <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-2">
+        <div className="grid min-h-0 flex-1 gap-3 md:grid-cols-[1fr_minmax(190px,0.7fr)_1fr]">
           <DropColumn
             id="context"
             title="Fixé"
-            subtitle="garde une seule valeur, identique pour tous les essais"
+            subtitle="une valeur, identique pour tous les essais"
             count={contextFactors.length}
             tone="slate"
           >
-            {contextFactors.map((factor) => (
-              <FactorCard
-                key={factor.id}
-                factor={factor}
-                zone="context"
-                values={valuesOf(factor)}
-                dragging={draggingId === factor.id}
-                onHelp={() => setHelpFactorId(factor.id)}
-                onSetValues={(values) => setBindingValues(factor.id, values)}
-                onMove={(zone) => moveFactor(factor.id, zone)}
-              />
+            {groupByCategory(contextFactors).map((section) => (
+              <CategorySection
+                key={`ctx-${section.category}`}
+                title={section.category}
+                count={section.items.length}
+              >
+                {section.items.map((factor) => (
+                  <FactorCard
+                    key={factor.id}
+                    factor={factor}
+                    zone="context"
+                    values={valuesOf(factor)}
+                    dragging={draggingId === factor.id}
+                    lock={lockedFactors.get(factor.id) ?? null}
+                    onHelp={() => setHelpFactorId(factor.id)}
+                    onSetValues={(values) => setBindingValues(factor.id, values)}
+                    onMove={(zone) => moveFactor(factor.id, zone)}
+                  />
+                ))}
+              </CategorySection>
+            ))}
+          </DropColumn>
+
+          <DropColumn
+            id="shelf"
+            title="Réserve"
+            subtitle="paramètres non utilisés — glisse-les à gauche ou à droite"
+            count={shelfFactors.length}
+            tone="indigo"
+            empty="Aucun paramètre disponible — tout est en jeu."
+          >
+            {groupByCategory(shelfFactors).map((section) => (
+              <CategorySection
+                key={`shelf-${section.category}`}
+                title={section.category}
+                count={section.items.length}
+              >
+                <div className="flex flex-wrap gap-1.5">
+                  {section.items.map((factor) => (
+                    <ShelfChip
+                      key={factor.id}
+                      factor={factor}
+                      dragging={draggingId === factor.id}
+                      locked={isLocked(factor.id)}
+                      onAdd={(zone) => moveFactor(factor.id, zone)}
+                    />
+                  ))}
+                </div>
+              </CategorySection>
             ))}
           </DropColumn>
 
@@ -331,24 +499,29 @@ export function PlanEditor({
             tone="accent"
             empty="Glisse un paramètre ici pour le faire varier."
           >
-            {testFactors.map((factor) => (
-              <FactorCard
-                key={factor.id}
-                factor={factor}
-                zone="variable"
-                values={valuesOf(factor)}
-                dragging={draggingId === factor.id}
-                onHelp={() => setHelpFactorId(factor.id)}
-                onSetValues={(values) => setBindingValues(factor.id, values)}
-                onMove={(zone) => moveFactor(factor.id, zone)}
-              />
+            {groupByCategory(testFactors).map((section) => (
+              <CategorySection
+                key={`var-${section.category}`}
+                title={section.category}
+                count={section.items.length}
+              >
+                {section.items.map((factor) => (
+                  <FactorCard
+                    key={factor.id}
+                    factor={factor}
+                    zone="variable"
+                    values={valuesOf(factor)}
+                    dragging={draggingId === factor.id}
+                    lock={lockedFactors.get(factor.id) ?? null}
+                    onHelp={() => setHelpFactorId(factor.id)}
+                    onSetValues={(values) => setBindingValues(factor.id, values)}
+                    onMove={(zone) => moveFactor(factor.id, zone)}
+                  />
+                ))}
+              </CategorySection>
             ))}
           </DropColumn>
         </div>
-
-        {shelfFactors.length > 0 ? (
-          <Shelf factors={shelfFactors} draggingId={draggingId} onMove={moveFactor} />
-        ) : null}
 
         <DragOverlay dropAnimation={null}>
           {draggingFactor ? (
@@ -397,6 +570,41 @@ function RunBadge({
 // Droppable column
 // ---------------------------------------------------------------------------
 
+type ColumnTone = "slate" | "accent" | "indigo";
+
+const TONE_STYLES: Record<
+  ColumnTone,
+  {
+    border: string;
+    headerBg: string;
+    dot: string;
+    countBg: string;
+    countText: string;
+  }
+> = {
+  slate: {
+    border: "border-slate-200",
+    headerBg: "bg-slate-50",
+    dot: "bg-slate-400",
+    countBg: "bg-white",
+    countText: "text-slate-600",
+  },
+  accent: {
+    border: "border-accent/30",
+    headerBg: "bg-accent/5",
+    dot: "bg-accent",
+    countBg: "bg-accent/10",
+    countText: "text-accent",
+  },
+  indigo: {
+    border: "border-indigo-200",
+    headerBg: "bg-indigo-50",
+    dot: "bg-indigo-400",
+    countBg: "bg-white",
+    countText: "text-indigo-600",
+  },
+};
+
 function DropColumn({
   id,
   title,
@@ -410,35 +618,32 @@ function DropColumn({
   title: string;
   subtitle: string;
   count: number;
-  tone: "slate" | "accent";
+  tone: ColumnTone;
   empty?: string;
   children: React.ReactNode;
 }) {
   const { isOver, setNodeRef } = useDroppable({ id });
+  const styles = TONE_STYLES[tone];
   return (
     <section
       ref={setNodeRef}
       className={`flex min-h-0 flex-col overflow-hidden rounded-lg border bg-white shadow-sm transition-colors ${
-        isOver
-          ? "border-accent ring-2 ring-accent/30"
-          : tone === "accent"
-            ? "border-accent/30"
-            : "border-line"
+        isOver ? "border-accent ring-2 ring-accent/30" : styles.border
       }`}
     >
-      <header className="flex items-center justify-between gap-2 border-b border-line px-3 py-2.5">
+      <header
+        className={`flex items-center justify-between gap-2 border-b border-line px-3 py-2.5 ${styles.headerBg}`}
+      >
         <div className="flex items-center gap-2">
-          <span
-            className={`inline-block h-2.5 w-2.5 rounded-full ${
-              tone === "accent" ? "bg-accent" : "bg-slate-300"
-            }`}
-          />
+          <span className={`inline-block h-2.5 w-2.5 rounded-full ${styles.dot}`} />
           <div>
             <div className="text-sm font-semibold text-ink">{title}</div>
             <div className="text-[11px] text-slate-500">{subtitle}</div>
           </div>
         </div>
-        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500 tabular-nums">
+        <span
+          className={`rounded-full px-2 py-0.5 text-xs font-semibold tabular-nums ${styles.countBg} ${styles.countText}`}
+        >
           {count}
         </span>
       </header>
@@ -468,6 +673,7 @@ function FactorCard({
   zone,
   values,
   dragging,
+  lock,
   onHelp,
   onSetValues,
   onMove,
@@ -476,12 +682,16 @@ function FactorCard({
   zone: Exclude<Zone, "shelf">;
   values: FactorValue[];
   dragging: boolean;
+  lock: { rule: ConfoundRule; triggerLabel: string } | null;
   onHelp: () => void;
   onSetValues: (values: FactorValue[]) => void;
   onMove: (zone: Zone) => void;
 }) {
   const { attributes, listeners, setNodeRef } = useDraggable({ id: factor.id });
   const hasHelp = hasFactorHelp(factor.id);
+  const warningTitle = lock
+    ? `Risque de confond : ${lock.triggerLabel} varie déjà. ${lock.rule.why}`
+    : undefined;
 
   return (
     <div
@@ -489,9 +699,11 @@ function FactorCard({
       className={`rounded-md border px-2.5 py-2 transition-colors ${
         dragging
           ? "opacity-40"
-          : zone === "variable"
-            ? "border-accent/30 bg-accent/[0.03]"
-            : "border-line bg-white"
+          : lock
+            ? "border-amber-300 bg-amber-50/40"
+            : zone === "variable"
+              ? "border-accent/30 bg-accent/[0.03]"
+              : "border-line bg-white"
       }`}
     >
       <div className="flex items-center gap-1.5 text-sm">
@@ -510,6 +722,14 @@ function FactorCard({
             <span className="ml-1 text-xs font-normal text-slate-400">{factor.unit}</span>
           ) : null}
         </span>
+        {lock ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700"
+            title={warningTitle}
+          >
+            ⚠ confond ?
+          </span>
+        ) : null}
         {hasHelp ? (
           <button
             aria-label={`Aide : ${factor.label}`}
@@ -531,6 +751,9 @@ function FactorCard({
         </button>
       </div>
       <div className="mt-1.5 pl-6">
+        {/* Locked factors stay editable as a single fixed value — the lock only
+            forbids VARYING them (move to "À tester" / multi-value), not picking
+            the value. */}
         <ValueEditor factor={factor} zone={zone} values={values} onCommit={onSetValues} />
       </div>
     </div>
@@ -541,79 +764,76 @@ function FactorCard({
 // Shelf of inactive (available) factors
 // ---------------------------------------------------------------------------
 
-function Shelf({
-  factors,
-  draggingId,
-  onMove,
-}: {
-  factors: FactorDef[];
-  draggingId: string | null;
-  onMove: (factorId: string, zone: Zone) => void;
-}) {
-  const { isOver, setNodeRef } = useDroppable({ id: "shelf" });
-  return (
-    <details className="rounded-lg border border-line bg-white px-3 py-2 shadow-sm">
-      <summary className="cursor-pointer select-none text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-500">
-        Autres paramètres ({factors.length})
-      </summary>
-      <div
-        ref={setNodeRef}
-        className={`mt-2 flex flex-wrap gap-2 rounded-md p-1 transition-colors ${
-          isOver ? "bg-slate-50 ring-1 ring-line" : ""
-        }`}
-      >
-        {factors.map((factor) => (
-          <ShelfChip
-            key={factor.id}
-            factor={factor}
-            dragging={draggingId === factor.id}
-            onAdd={(zone) => onMove(factor.id, zone)}
-          />
-        ))}
-      </div>
-    </details>
-  );
-}
-
 function ShelfChip({
   factor,
   dragging,
+  locked,
   onAdd,
 }: {
   factor: FactorDef;
   dragging: boolean;
+  locked: boolean;
   onAdd: (zone: Zone) => void;
 }) {
-  const { attributes, listeners, setNodeRef } = useDraggable({ id: factor.id });
+  const { attributes, listeners, setNodeRef } = useDraggable({
+    id: factor.id,
+    disabled: locked,
+  });
   return (
     <div
       ref={setNodeRef}
-      className={`flex items-center gap-1.5 rounded-full border border-line bg-slate-50 py-1 pl-1 pr-1.5 text-xs ${
-        dragging ? "opacity-40" : ""
+      className={`flex items-center gap-1.5 rounded-full border py-1 pl-1 pr-1.5 text-xs ${
+        dragging
+          ? "border-line bg-slate-50 opacity-40"
+          : locked
+            ? "border-amber-300 bg-amber-50"
+            : "border-line bg-slate-50"
       }`}
+      title={
+        locked
+          ? "Verrouillé par une étude en cours"
+          : FACTOR_HELP[factor.id]?.intro
+      }
     >
       <button
-        className="flex h-5 w-4 cursor-grab touch-none items-center justify-center text-slate-400 hover:text-slate-600 active:cursor-grabbing"
+        className={`flex h-5 w-4 touch-none items-center justify-center ${
+          locked
+            ? "cursor-not-allowed text-slate-300"
+            : "cursor-grab text-slate-400 hover:text-slate-600 active:cursor-grabbing"
+        }`}
         aria-label={`Déplacer ${factor.label}`}
+        disabled={locked}
         type="button"
         {...attributes}
         {...listeners}
       >
         <GripIcon />
       </button>
-      <span className="font-medium text-slate-600">{factor.label}</span>
+      <span className={`font-medium ${locked ? "text-amber-700" : "text-slate-600"}`}>
+        {factor.label}
+      </span>
       <button
-        className="rounded-full px-1.5 py-0.5 font-semibold text-accent hover:bg-accent hover:text-white"
+        className={`rounded-full px-1.5 py-0.5 font-semibold ${
+          locked
+            ? "cursor-not-allowed text-slate-300"
+            : "text-accent hover:bg-accent hover:text-white"
+        }`}
+        disabled={locked}
         onClick={() => onAdd("variable")}
-        title="Ajouter aux paramètres testés"
+        title={locked ? "Verrouillé" : "Ajouter aux paramètres testés"}
         type="button"
       >
         Tester
       </button>
       <button
-        className="rounded-full px-1.5 py-0.5 font-semibold text-slate-500 hover:bg-slate-200"
+        className={`rounded-full px-1.5 py-0.5 font-semibold ${
+          locked
+            ? "cursor-not-allowed text-slate-300"
+            : "text-slate-500 hover:bg-slate-200"
+        }`}
+        disabled={locked}
         onClick={() => onAdd("context")}
-        title="Ajouter au contexte fixé"
+        title={locked ? "Verrouillé" : "Ajouter au contexte fixé"}
         type="button"
       >
         Fixer
@@ -985,6 +1205,84 @@ function roundTo(value: number, decimals: number): number {
 // ---------------------------------------------------------------------------
 // Icons (inline SVG, no emoji)
 // ---------------------------------------------------------------------------
+
+function CategorySection({
+  title,
+  count,
+  children,
+}: {
+  title: string;
+  count: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="flex flex-col gap-1.5">
+      <header className="flex items-center gap-1.5 px-0.5 pt-1">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-500">
+          {title}
+        </span>
+        <span className="inline-flex h-4 min-w-[18px] items-center justify-center rounded-full bg-slate-100 px-1 text-[10px] font-semibold text-slate-500 tabular-nums">
+          {count}
+        </span>
+        <span className="h-px flex-1 bg-slate-100" />
+      </header>
+      <div className="flex flex-col gap-2">{children}</div>
+    </section>
+  );
+}
+
+function LockIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect height="8" rx="1" width="10" x="3" y="7" />
+      <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" />
+    </svg>
+  );
+}
+
+function LockBanner({
+  lockedFactors,
+}: {
+  lockedFactors: Map<string, { rule: ConfoundRule; triggerLabel: string }>;
+}) {
+  // Soft warning: group flagged factors by the trigger rule so we display one
+  // row per study. Behaviour is purely advisory — nothing is forced.
+  const byTrigger = new Map<string, { triggerLabel: string; why: string; locked: string[] }>();
+  for (const [factorId, info] of lockedFactors) {
+    const entry = byTrigger.get(info.rule.trigger);
+    const label = getFactorById(factorId)?.label ?? factorId;
+    if (entry) {
+      entry.locked.push(label);
+    } else {
+      byTrigger.set(info.rule.trigger, {
+        triggerLabel: info.triggerLabel,
+        why: info.rule.why,
+        locked: [label],
+      });
+    }
+  }
+  return (
+    <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 lg:col-span-2">
+      <div className="flex items-start gap-2">
+        <span className="mt-0.5 text-amber-700">⚠</span>
+        <div className="flex flex-col gap-1">
+          <div className="font-semibold">
+            Risque de confond — possible mais l'attribution sera plus difficile :
+          </div>
+          {[...byTrigger.values()].map((entry, i) => (
+            <div key={i}>
+              <span className="font-semibold">{entry.triggerLabel}</span> varie déjà ; faire varier en plus
+              {" "}
+              <span className="font-medium">{entry.locked.join(", ")}</span>
+              {" "}mélange les effets. <span className="text-amber-700">{entry.why}</span>
+              {" "}<span className="italic text-amber-600">Pour une étude d'interaction volontaire, ignore.</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function GripIcon() {
   return (

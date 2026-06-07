@@ -112,7 +112,13 @@ export interface PickingStation {
   id: EntityId;
   name: string;
   position: GridPosition;
+  /** Primary access cell (kept for backwards compat / display). Equals
+   *  `accessPositions[0]`. */
   accessPosition: GridPosition;
+  /** All drop cells available at this station. Robots route to whichever is
+   *  closest, modelling a multi-lane loading bay instead of a single
+   *  one-robot-at-a-time bottleneck cell. */
+  accessPositions: GridPosition[];
   queueLength: number;
   processedOrders: number;
   active: boolean;
@@ -168,7 +174,9 @@ export type RobotState =
   | "movingToCharger"
   | "waiting"
   | "charging"
-  | "failed";
+  | "failed"
+  /** Battery hit 0 mid-task: the robot is stranded until rescued/recharged. */
+  | "depleted";
 
 export interface Robot {
   id: EntityId;
@@ -295,6 +303,9 @@ export interface WarehouseConfig {
   rackCount: number;
   pickingStationCount: number;
   pickingStationOrientation: "length" | "width";
+  /** Number of drop cells per picking station (lanes). Default = 2 so robots
+   *  don't all queue on the same single cell — closer to a real loading bay. */
+  pickingStationLaneCount?: number;
   chargingStationCount: number;
   layoutPreset: "small" | "balanced" | "dense" | "rails-placeholder";
 }
@@ -385,6 +396,8 @@ export interface SimulationMetrics {
   elevatorTrips: number;
   elevatorRideTicks: number;
   elevatorWaitTicks: number;
+  /** Cumulative count of robots that ran flat mid-task over the run. */
+  depletionEvents: number;
   averageBatteryLevel: number;
   minimumBatteryLevel: number;
   demandWeightedStorageDistance: number;

@@ -12,7 +12,9 @@ import {
 import { createSeededRandom, type SeededRandom } from "../../utils/random";
 import {
   calculateMetrics,
+  calculateSlottingMetrics,
   createEmptyMetrics,
+  type SlottingMetrics,
 } from "../metrics/calculateMetrics";
 import type {
   ElevatorZone,
@@ -22,6 +24,7 @@ import type {
   Robot,
   SimulationConfig,
   SimulationState,
+  SKU,
   StorageLocation,
   Task,
   Warehouse,
@@ -49,7 +52,12 @@ export class SimulationEngine {
   private orderCounter = 1;
   private taskCounter = 1;
   private congestionEvents = 0;
+  private depletionEvents = 0;
   private massFactor = 1;
+  /** Run-invariant lookups + slotting, built once to avoid per-tick rescans. */
+  private skuById!: Map<string, SKU>;
+  private locationById!: Map<string, StorageLocation>;
+  private slottingCache!: SlottingMetrics;
 
   constructor(config: SimulationConfig) {
     const clonedConfig = cloneConfig(config);
@@ -77,6 +85,13 @@ export class SimulationEngine {
     this.blockedCells = buildBlockedCellSet(warehouse);
     this.cellMap = buildCellMap(warehouse);
     this.connectorCellMap = buildConnectorCellMap(warehouse);
+    // Built once: SKU placement and layout are fixed for the whole run, so these
+    // lookups and the slotting score never change tick-to-tick.
+    this.skuById = new Map(warehouse.skuCatalog.map((sku) => [sku.id, sku]));
+    this.locationById = new Map(
+      warehouse.storageLocations.map((location) => [location.id, location]),
+    );
+    this.slottingCache = calculateSlottingMetrics(warehouse);
     this.state = {
       config: clonedConfig,
       warehouse,
@@ -109,9 +124,11 @@ export class SimulationEngine {
       previousSeries: this.state.metrics.series,
       completedThisTick,
       congestionEvents: this.congestionEvents,
+      depletionEvents: this.depletionEvents,
       connectorTraffic: this.getConnectorTraffic(),
       connectorWait: this.getConnectorWait(),
       warehouse: this.state.warehouse,
+      slotting: this.slottingCache,
     });
   }
 
@@ -312,28 +329,50 @@ export class SimulationEngine {
       return undefined;
     }
 
-    const sku = this.state.warehouse.skuCatalog.find((candidate) => candidate.id === skuId);
+    const sku = this.skuById.get(skuId);
     if (!sku?.currentLocation) {
       return undefined;
     }
 
-    return this.state.warehouse.storageLocations.find(
-      (location) => location.id === sku.currentLocation,
-    );
+    return this.locationById.get(sku.currentLocation);
   }
 
   private findNearestStation(position: GridPosition): PickingStation {
+    // Distance is taken to the CLOSEST lane of each station (multi-lane bays).
+    const distanceToStation = (station: PickingStation): number =>
+      Math.min(
+        ...station.accessPositions.map((p) => manhattanDistance(p, position)),
+      );
     return [...this.state.warehouse.pickingStations].sort(
       (a, b) =>
-        this.scoreWithTrafficJitter(
-          manhattanDistance(a.accessPosition, position),
-          a.id,
-        ) -
-        this.scoreWithTrafficJitter(
-          manhattanDistance(b.accessPosition, position),
-          b.id,
-        ),
+        this.scoreWithTrafficJitter(distanceToStation(a), a.id) -
+        this.scoreWithTrafficJitter(distanceToStation(b), b.id),
     )[0];
+  }
+
+  /** Pick the access lane of `station` that the robot should head to: the
+   *  closest lane that is not currently occupied by another robot. Falls back
+   *  to the closest lane if everything is occupied. */
+  private chooseStationDropCell(
+    robot: Robot,
+    station: PickingStation,
+  ): GridPosition {
+    const occupied = new Set(
+      this.state.robots
+        .filter((r) => r.id !== robot.id)
+        .map((r) => this.positionLevelKey(r.position, r.level)),
+    );
+    const candidates = [...station.accessPositions].sort(
+      (a, b) =>
+        manhattanDistance(a, robot.position) -
+        manhattanDistance(b, robot.position),
+    );
+    for (const cell of candidates) {
+      if (!occupied.has(this.positionLevelKey(cell, 0))) {
+        return cell;
+      }
+    }
+    return candidates[0];
   }
 
   private pickRobotForOrder(
@@ -395,6 +434,20 @@ export class SimulationEngine {
         continue;
       }
 
+      if (robot.state === "depleted") {
+        // Stranded flat: blocks its cell while being rescued/recharged, then
+        // re-enters service with a full battery. This is what makes battery a
+        // real constraint — a fleet that runs dry loses throughput.
+        robot.serviceTicksRemaining -= 1;
+        robot.waitingTicks += 1;
+        if (robot.serviceTicksRemaining <= 0) {
+          robot.battery = robot.maxBattery;
+          this.releaseRobot(robot, "Recharged after depletion");
+        }
+        occupied.add(this.positionLevelKey(robot.position, robot.level));
+        continue;
+      }
+
       if (this.shouldFailRobot()) {
         const order = this.findAssignedOrder(robot);
         if (order) {
@@ -411,6 +464,9 @@ export class SimulationEngine {
           task.status = "failed";
           task.completedAt = this.state.elapsedSeconds;
         }
+        // A robot failing mid-ride must free its cabin, or the elevator stays
+        // locked for the rest of the run.
+        this.releaseElevatorHold(robot);
         robot.state = "failed";
         robot.assignedOrderId = undefined;
         robot.currentTaskId = undefined;
@@ -474,6 +530,14 @@ export class SimulationEngine {
         robot.state === "movingToElevator" ||
         robot.state === "movingToCharger"
       ) {
+        // A robot that ran flat can't move. It strands in place (except when it
+        // was already heading to a charger — there's nothing to rescue, it just
+        // can't reach it, so it still strands). Battery is now a hard limit.
+        if (robot.battery <= 0) {
+          this.depleteRobot(robot);
+          occupied.add(this.positionLevelKey(robot.position, robot.level));
+          continue;
+        }
         robot.activeTicks += 1;
         this.moveRobot(robot, occupied, reserved);
         occupied.add(this.positionLevelKey(robot.position, robot.level));
@@ -571,11 +635,8 @@ export class SimulationEngine {
 
     if (robot.state === "movingToPick") {
       const order = this.findAssignedOrder(robot);
-      const sku = order
-        ? this.state.warehouse.skuCatalog.find(
-            (candidate) => candidate.id === order.lines[0]?.skuId,
-          )
-        : undefined;
+      const skuId = order?.lines[0]?.skuId;
+      const sku = skuId ? this.skuById.get(skuId) : undefined;
       const serviceTicks = Math.max(1, Math.round(sku?.handlingTime ?? 2));
 
       robot.state = "picking";
@@ -624,10 +685,11 @@ export class SimulationEngine {
     order.pickedAt = this.state.elapsedSeconds;
     order.status = "inTransit";
 
+    const dropCell = this.chooseStationDropCell(robot, station);
     if (robot.level !== 0) {
       const route = this.createElevatorRoute(
         robot,
-        station.accessPosition,
+        dropCell,
         0,
         "dropoff",
       );
@@ -647,7 +709,7 @@ export class SimulationEngine {
       return;
     }
 
-    const route = this.createHorizontalRoute(robot, station.accessPosition, "movingToDropoff");
+    const route = this.createHorizontalRoute(robot, dropCell, "movingToDropoff");
     if (!route) {
       this.registerRobotDelay(robot, "Delivery route blocked");
       return;
@@ -691,6 +753,23 @@ export class SimulationEngine {
     return 1;
   }
 
+  /** Free any elevator cabin this robot is currently riding/holding. Safe to
+   *  call on any robot: it only releases a cabin whose `reservedBy` matches.
+   *  Must run on every exit path of a riding robot (completion, release,
+   *  breakdown) or the cabin stays locked forever. */
+  private releaseElevatorHold(robot: Robot): void {
+    if (!robot.targetElevatorId) {
+      return;
+    }
+    const elevator = this.state.warehouse.elevatorZones.find(
+      (candidate) => candidate.id === robot.targetElevatorId,
+    );
+    if (elevator && elevator.reservedBy === robot.id) {
+      elevator.busy = false;
+      elevator.reservedBy = undefined;
+    }
+  }
+
   private releaseRobot(robot: Robot, event: string): void {
     if (robot.targetChargerId) {
       const charger = this.state.warehouse.chargingStations.find(
@@ -700,6 +779,7 @@ export class SimulationEngine {
         charger.occupiedBy = undefined;
       }
     }
+    this.releaseElevatorHold(robot);
     robot.state = "idle";
     robot.assignedOrderId = undefined;
     robot.currentTaskId = undefined;
@@ -721,9 +801,7 @@ export class SimulationEngine {
       return;
     }
 
-    const location = this.state.warehouse.storageLocations.find(
-      (candidate) => candidate.id === order.storageLocationId,
-    );
+    const location = this.locationById.get(order.storageLocationId);
     if (location) {
       location.accessCount += 1;
     }
@@ -735,9 +813,8 @@ export class SimulationEngine {
       rack.accessCount += 1;
     }
 
-    const sku = this.state.warehouse.skuCatalog.find(
-      (candidate) => candidate.id === order.lines[0]?.skuId,
-    );
+    const skuId = order.lines[0]?.skuId;
+    const sku = skuId ? this.skuById.get(skuId) : undefined;
     if (sku) {
       sku.accessCount += 1;
     }
@@ -752,7 +829,9 @@ export class SimulationEngine {
         (robot) =>
           robot.assignedOrderId &&
           robot.destination &&
-          samePosition(robot.destination, station.accessPosition),
+          station.accessPositions.some((cell) =>
+            samePosition(robot.destination!, cell),
+          ),
       );
       if (station.active) {
         station.busyTicks += 1;
@@ -869,6 +948,12 @@ export class SimulationEngine {
     return "manhattan";
   }
 
+  /** Cells treated as obstacles when planning a path. Includes ALL robots (not
+   *  just stationary ones) on purpose: under traffic-weighted A* + reservation,
+   *  planning around current robot positions is proactive coordination that
+   *  spreads the fleet across lanes. An A/B test confirmed that ignoring moving
+   *  robots collapses throughput (~3x worse) and raises congestion, because
+   *  robots then plan colliding paths the reservation layer must stall. */
   private getOccupiedCells(exceptRobotId?: string, level = 0): Set<string> {
     return new Set(
       this.state.robots
@@ -946,8 +1031,16 @@ export class SimulationEngine {
       | undefined;
 
     for (const elevator of this.state.warehouse.elevatorZones) {
+      // Soft penalty for a busy/queued cabin so robots spread across the
+      // available lifts instead of all piling onto the nearest one. Tuned to
+      // roughly one extra aisle-length of detour per robot already waiting.
+      const busyPenalty =
+        (elevator.busy ? 6 : 0) + elevator.queueLength * 4;
       for (const stop of elevator.cells) {
-        const score = manhattanDistance(from, stop) + manhattanDistance(stop, to);
+        const score =
+          manhattanDistance(from, stop) +
+          manhattanDistance(stop, to) +
+          busyPenalty;
         const jitteredScore = this.scoreWithTrafficJitter(
           score,
           `${elevator.id}:${positionKey(stop)}`,
@@ -970,6 +1063,18 @@ export class SimulationEngine {
 
     if (levelDelta === 0) {
       this.completeElevatorRide(robot);
+      return;
+    }
+
+    // Elevator cabin is a finite resource: one robot per cabin (= per vertical
+    // aisle) at a time. If it's occupied by someone else, park at the access
+    // cell and retry next tick — the robot stays in `movingToElevator` so
+    // `handleArrival` re-enters here once the cabin frees up.
+    if (elevator && elevator.busy && elevator.reservedBy !== robot.id) {
+      robot.waitingTicks += 1;
+      robot.elevatorWaitTicks += 1;
+      this.congestionEvents += 1;
+      robot.recentEvents = addEvent(robot.recentEvents, "Waiting for elevator");
       return;
     }
 
@@ -1054,7 +1159,8 @@ export class SimulationEngine {
       return;
     }
 
-    const route = this.createHorizontalRoute(robot, station.accessPosition, "movingToDropoff");
+    const dropCell = this.chooseStationDropCell(robot, station);
+    const route = this.createHorizontalRoute(robot, dropCell, "movingToDropoff");
     if (!route) {
       this.registerRobotDelay(robot, "Station route blocked");
       return;
@@ -1077,6 +1183,53 @@ export class SimulationEngine {
     }
     robot.waitingTicks += 1;
     this.releaseRobot(robot, event);
+  }
+
+  /** Robot ran out of battery mid-task. Hand its order back to the queue, free
+   *  any elevator it held, and strand it for a rescue/recharge window. It
+   *  re-enters service (full battery) once `serviceTicksRemaining` elapses. */
+  private depleteRobot(robot: Robot): void {
+    const order = this.findAssignedOrder(robot);
+    if (order) {
+      order.status = "pending";
+      order.assignedAt = undefined;
+      order.stationId = undefined;
+      order.rackId = undefined;
+      order.storageLocationId = undefined;
+    }
+    const task = this.state.tasks.find(
+      (candidate) => candidate.id === robot.currentTaskId,
+    );
+    if (task) {
+      task.status = "failed";
+      task.completedAt = this.state.elapsedSeconds;
+    }
+    this.releaseElevatorHold(robot);
+    if (robot.targetChargerId) {
+      const charger = this.state.warehouse.chargingStations.find(
+        (candidate) => candidate.id === robot.targetChargerId,
+      );
+      if (charger && charger.occupiedBy === robot.id) {
+        charger.occupiedBy = undefined;
+      }
+    }
+    this.depletionEvents += 1;
+    robot.state = "depleted";
+    robot.assignedOrderId = undefined;
+    robot.currentTaskId = undefined;
+    robot.destination = undefined;
+    robot.targetLevel = undefined;
+    robot.targetElevatorId = undefined;
+    robot.routeAfterElevator = undefined;
+    robot.targetChargerId = undefined;
+    robot.path = [];
+    robot.battery = 0;
+    // Rescue + recharge time, proxied by the configured recharge duration.
+    robot.serviceTicksRemaining = Math.max(
+      1,
+      this.state.config.robots.rechargeTicks,
+    );
+    robot.recentEvents = addEvent(robot.recentEvents, "Battery depleted");
   }
 
   private positionLevelKey(position: GridPosition, level: number): string {

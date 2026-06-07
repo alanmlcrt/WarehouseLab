@@ -1032,6 +1032,8 @@ function robotColor(state: Robot["state"]): string {
       return "#22c55e";
     case "failed":
       return "#dc2626";
+    case "depleted":
+      return "#7c2d12";
     default:
       return "#64748b";
   }

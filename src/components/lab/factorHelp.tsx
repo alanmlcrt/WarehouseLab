@@ -25,6 +25,8 @@ export interface FactorHelp {
   intro: string;
   legend?: ReactNode;
   modes: HelpMode[];
+  /** Optional narrative body shown instead of the modes grid (numeric factors). */
+  body?: ReactNode;
 }
 
 // --- small SVG primitives --------------------------------------------------
@@ -453,6 +455,293 @@ export const FACTOR_HELP: Record<string, FactorHelp> = {
       },
     ],
   },
+  warehouseSize: {
+    title: "Taille de l'entrepôt",
+    intro:
+      "Définit les dimensions de la grille (largeur × profondeur en cellules). Les racks remplissent automatiquement l'espace disponible, donc agrandir = plus d'emplacements ET plus de trajets.",
+    modes: [],
+    body: (
+      <NarrativeBody
+        effect="Plus l'entrepôt est grand, plus la distance moyenne par commande augmente — il faut soit plus de robots, soit un meilleur slotting pour compenser."
+        paragraphs={[
+          "XS (12×10) et S (18×14) servent à itérer vite : une simulation se calcule en quelques secondes. M (24×18) est un bon compromis pour les études comparatives. L (32×24) et XL (42×30) stressent les algorithmes de circulation et exposent les bouchons.",
+        ]}
+        tips={[
+          "Pour comparer plusieurs stratégies, fixe la taille à S ou M — sinon le total d'essais explose et le bruit augmente.",
+          "Sur XL, augmente `Durée simulée` à 5–10 min pour atteindre l'état stationnaire avant de mesurer.",
+          "Les KPI structurels `warehouseWidth` / `warehouseHeight` / `effectiveRackCount` te disent ce qui a réellement été construit.",
+        ]}
+      />
+    ),
+  },
+  crossAisleSpacing: {
+    title: "Passages transverses (cross-aisles)",
+    intro:
+      "Nombre de passages perpendiculaires qui coupent les allées de racks. Sans passage, un robot doit faire le tour complet d'une allée pour changer de couloir.",
+    modes: [],
+    body: (
+      <NarrativeBody
+        effect="Plus de passages = trajets plus courts MAIS moins d'emplacements de stockage. À régler en fonction de la longueur des allées."
+        paragraphs={[
+          "0 passage : layout maximaliste en stockage, mais trajets en U coûteux. 1–2 passages : compromis classique. 3+ : utile pour les grands entrepôts où les allées font 20+ cellules.",
+        ]}
+        tips={[
+          "Sur une taille S/M, 0–2 suffit ; sur L/XL, teste 2–4.",
+          "Combine avec `pickingStationOrientation` : des passages transverses n'ont d'intérêt que s'ils mènent vers les stations.",
+        ]}
+      />
+    ),
+  },
+  levelCount: {
+    title: "Niveaux (entrepôt vertical)",
+    intro:
+      "Nombre d'étages superposés. Au-delà de 1 niveau, des ascenseurs (lignes verticales dédiées) sont ajoutés le long des couloirs principaux et les robots ne peuvent changer d'étage que via ces lignes.",
+    modes: [],
+    body: (
+      <NarrativeBody
+        effect="Plus de niveaux = plus de capacité de stockage mais pression accrue sur les ascenseurs (KPI `verticalPressure` et `elevatorTrips`)."
+        paragraphs={[
+          "1 niveau : pas d'ascenseur, comportement purement 2D — utile pour isoler l'effet du slotting ou du pathfinding.",
+          "2–4 niveaux : configuration typique d'un mini-load AS/RS. Les ascenseurs deviennent un goulot d'étranglement potentiel.",
+          "5+ niveaux : empile beaucoup de SKU mais demande beaucoup d'ascenseurs et de robots, sinon le backlog vertical explose.",
+        ]}
+        tips={[
+          "Si tu fais varier `levelCount`, surveille `verticalPressure` et `elevatorTrips` dans l'Explorer — c'est là que les saturations apparaissent.",
+          "Les ascenseurs suivent les couloirs : leur nombre est dérivé de la géométrie, pas un paramètre indépendant.",
+          "Pour comparer 1 vs 2 niveaux, garde le nombre de SKU constant — sinon tu mélanges effet géométrie et effet catalogue.",
+        ]}
+      />
+    ),
+  },
+  pickingStationCount: {
+    title: "Stations de picking",
+    intro:
+      "Nombre de stations vers lesquelles les robots livrent les caisses. Chaque station est un point de dépôt en bord d'entrepôt et concentre du trafic.",
+    modes: [],
+    body: (
+      <NarrativeBody
+        effect="Plus de stations = trafic réparti, moins de congestion locale, mais coût CAPEX en hausse et placement ABC plus difficile à équilibrer."
+        paragraphs={[
+          "1–2 stations : configuration minimaliste, idéale pour mesurer la qualité d'un slotting ABC pur (toute la demande converge vers peu de points).",
+          "3–4 stations : standard sur un entrepôt M/L — il faut alors un slotting `balancedABCStorage` pour éviter qu'une seule station prenne tout le flux.",
+          "5+ : utile uniquement si `ordersPerMinute` est très élevé ou si tu veux étudier la robustesse face à des pannes de station.",
+        ]}
+        tips={[
+          "Si une station sature (`connectorWait` élevé), augmente le nombre OU passe à `balancedABCStorage`.",
+          "Sur layout S, plus de 3 stations sert rarement à quelque chose — l'entrepôt est trop petit pour générer assez de trafic.",
+          "À comparer avec `pickingStationOrientation` : 4 stations alignées sur la longueur ≠ 4 stations sur la largeur.",
+        ]}
+      />
+    ),
+  },
+  pickingStationOrientation: {
+    title: "Orientation des stations",
+    intro:
+      "Détermine sur quel côté de l'entrepôt les stations sont alignées : sur le côté long (`length`) ou sur le côté court (`width`).",
+    modes: [
+      {
+        label: "length — côté long",
+        summary: "Stations réparties sur le grand côté de l'entrepôt.",
+        detail:
+          "Les robots traversent l'entrepôt dans la profondeur (côté court). Trajets plus courts en moyenne mais flux concentré dans une direction.",
+      },
+      {
+        label: "width — côté court",
+        summary: "Stations alignées sur le petit côté.",
+        detail:
+          "Les robots empruntent toute la longueur de l'entrepôt. Trajets plus longs en moyenne mais meilleure répartition du trafic dans les allées transverses.",
+      },
+    ],
+  },
+  chargingStationCount: {
+    title: "Chargeurs",
+    intro:
+      "Nombre de bornes de recharge disponibles. Quand un robot descend sous `rechargeThreshold`, il rejoint un chargeur libre — s'il n'y en a pas, il attend.",
+    modes: [],
+    body: (
+      <NarrativeBody
+        effect="Trop peu de chargeurs = file d'attente à la recharge (`chargingShare` élevé, `averageRobotUtilization` en chute). Trop = CAPEX gaspillé."
+        paragraphs={[
+          "Règle de pouce : 1 chargeur pour 4–6 robots si `rechargeTicks` est rapide, 1 pour 2–3 si la recharge est lente.",
+        ]}
+        tips={[
+          "Surveille `chargingShare` (part du temps passé en recharge) et `chargeSessions` pour calibrer.",
+          "Si `minimumBatteryLevel` tombe à 0, ce n'est pas un manque de chargeurs mais un seuil de recharge trop bas — ajuste `rechargeThreshold`.",
+        ]}
+      />
+    ),
+  },
+  robotCount: {
+    title: "Nombre de robots",
+    intro:
+      "Taille du parc actif. Le levier le plus direct pour augmenter le débit — et le plus coûteux en CAPEX.",
+    modes: [],
+    body: (
+      <NarrativeBody
+        effect="Plus de robots = plus de débit, jusqu'à un palier (saturation des couloirs et des stations) au-delà duquel ajouter un robot dégrade les KPI."
+        paragraphs={[
+          "C'est typiquement le facteur à faire VARIER (3–5 valeurs) pour trouver le R* optimal d'une configuration donnée. Pour une étude propre, fais varier `robotCount` et fixe le reste.",
+        ]}
+        tips={[
+          "Trace `throughputPerRobot` vs `robotCount` : la courbe plafonne puis chute → tu as trouvé la saturation.",
+          "Si la `feasibilityMargin` devient négative, c'est qu'il n'y a pas assez de robots pour absorber la demande.",
+          "Augmenter robotCount sans augmenter `chargingStationCount` finit par créer un bouchon à la recharge.",
+        ]}
+      />
+    ),
+  },
+  ordersPerMinute: {
+    title: "Commandes / minute",
+    intro:
+      "Cadence d'arrivée des commandes (en réalité de caisses, car 1 robot = 1 caisse). C'est la « charge » imposée à l'entrepôt.",
+    modes: [],
+    body: (
+      <NarrativeBody
+        effect="Détermine si le système est sous-chargé (`feasibilityMargin` > 0, backlog stable) ou saturé (backlog qui croît sans limite)."
+        paragraphs={[
+          "Fais varier `ordersPerMinute` pour tracer la courbe de saturation : à partir de quelle cadence le débit cesse de suivre la demande ?",
+        ]}
+        tips={[
+          "Combine avec `peakProfile` pour tester la robustesse aux surcharges temporaires.",
+          "Si tu compares deux configurations, fixe `ordersPerMinute` à une valeur où LES DEUX sont faisables — sinon tu compares deux régimes différents.",
+          "Demande réelle = `ordersPerMinute × averageItemsPerOrder`, lue dans le KPI `demandPerMinute`.",
+        ]}
+      />
+    ),
+  },
+  urgentOrderRate: {
+    title: "Part de commandes urgentes",
+    intro:
+      "Ratio de commandes marquées « urgentes » qui passent en priorité dans la file. 0 = aucune priorité, 1 = toutes urgentes (équivalent à 0).",
+    modes: [],
+    body: (
+      <NarrativeBody
+        effect="Une part d'urgents > 0 améliore le `serviceLevel` des urgents au prix d'une légère dégradation pour les commandes standards."
+        paragraphs={[
+          "Sert à modéliser des SLA différenciés (express vs standard). L'effet est subtil en sous-charge et marqué en surcharge.",
+        ]}
+        tips={[
+          "Pour un effet visible, garde `urgentOrderRate` entre 0.05 et 0.30. Au-delà, la priorisation perd son sens.",
+          "Combine avec `peakProfile` intense : c'est dans les pics que la priorisation se voit le mieux.",
+        ]}
+      />
+    ),
+  },
+  peakProfile: {
+    title: "Profil de pic de demande",
+    intro:
+      "Définit si la cadence d'arrivée est plate ou comporte une surcharge temporaire pendant la simulation. Sert à tester la résilience à un coup de feu.",
+    modes: [
+      {
+        label: "none — Plat",
+        summary: "Demande constante du début à la fin.",
+        detail:
+          "Aucun pic. Bon témoin pour mesurer le régime stationnaire pur, sans transitoire.",
+        diagram: <UniformDemand />,
+      },
+      {
+        label: "moderate — Pic ×2",
+        summary: "Demande doublée pendant 3 min, à partir de la 2e minute.",
+        detail:
+          "Surcharge modérée. Un système bien dimensionné absorbe sans casser le `serviceLevel`. Le backlog gonfle puis se résorbe.",
+        diagram: (
+          <Bars
+            colors={[PATH, PATH, HOT, HOT, HOT, PATH]}
+            heights={[34, 34, 60, 60, 60, 34]}
+          />
+        ),
+      },
+      {
+        label: "intense — Pic ×3",
+        summary: "Demande triplée pendant 4 min.",
+        detail:
+          "Surcharge sévère. Révèle les goulots d'étranglement : congestion, file à la recharge, backlog qui ne se résorbe pas avant la fin du run. Très utile pour comparer la robustesse de deux stratégies.",
+        diagram: (
+          <Bars
+            colors={[PATH, PATH, HOT, HOT, HOT, HOT]}
+            heights={[34, 34, 78, 78, 78, 78]}
+          />
+        ),
+      },
+    ],
+  },
+  maxBattery: {
+    title: "Autonomie batterie",
+    intro:
+      "Capacité de la batterie : combien de déplacements un robot peut faire avant de devoir recharger.",
+    modes: [],
+    body: (
+      <NarrativeBody
+        effect="Plus d'autonomie = moins de temps perdu à recharger, mais une grosse batterie est plus lourde, donc le robot consomme un peu plus à chaque case (rendement non linéaire)."
+        paragraphs={[
+          "Trop basse, des robots tombent en panne sèche en pleine tâche (voir le KPI « Pannes batterie »). Trop haute, on paie du poids et du coût pour rien.",
+        ]}
+        tips={[
+          "Pour trouver l'autonomie suffisante, fais-la varier et regarde à partir de quand « Pannes batterie » tombe à zéro.",
+        ]}
+      />
+    ),
+  },
+  payloadKg: {
+    title: "Charge utile (poids transporté)",
+    intro:
+      "Poids de la caisse transportée. Sert à modéliser des produits plus ou moins lourds.",
+    modes: [],
+    body: (
+      <NarrativeBody
+        effect="Plus le robot est chargé, plus il consomme d'énergie par case parcourue — l'autonomie effective baisse donc avec des charges lourdes."
+        paragraphs={[]}
+        tips={[
+          "À combiner avec l'autonomie batterie : une charge lourde peut exiger une plus grosse batterie pour éviter les pannes.",
+        ]}
+      />
+    ),
+  },
+  energyPerCell: {
+    title: "Énergie par cellule",
+    intro:
+      "Quantité d'énergie qu'un robot dépense pour franchir une case de la grille. C'est le « taux de consommation » de base.",
+    modes: [],
+    body: (
+      <NarrativeBody
+        effect="Plus c'est élevé, plus la batterie se vide vite → recharges plus fréquentes et risque de panne sèche. La valeur réelle est encore majorée par le poids (robot + batterie + charge)."
+        paragraphs={[]}
+        tips={[
+          "Paramètre avancé : si tu ne sais pas quoi mettre, laisse la valeur par défaut et joue plutôt sur l'autonomie batterie.",
+        ]}
+      />
+    ),
+  },
+  failureProbability: {
+    title: "Taux de panne",
+    intro:
+      "Probabilité qu'un robot tombe en panne à chaque seconde simulée. 0 = flotte parfaitement fiable.",
+    modes: [],
+    body: (
+      <NarrativeBody
+        effect="Une panne immobilise le robot, rend sa commande à la file, et le robot redémarre après un temps de réparation. Plus le taux est haut, plus le débit chute et devient irrégulier."
+        paragraphs={[]}
+        tips={[
+          "Valeurs typiques très faibles (0.001 = ~1 panne toutes les ~1000 s par robot). Sert à tester la résilience, pas le fonctionnement nominal.",
+        ]}
+      />
+    ),
+  },
+  meanFailureTicks: {
+    title: "Temps de réparation (MTTR)",
+    intro:
+      "Durée moyenne d'immobilisation après une panne (MTTR = Mean Time To Repair), en secondes simulées.",
+    modes: [],
+    body: (
+      <NarrativeBody
+        effect="Plus la réparation est longue, plus une panne coûte cher en débit. N'a d'effet que si le taux de panne est supérieur à 0."
+        paragraphs={[]}
+        tips={[
+          "Le temps réel de chaque panne varie autour de cette moyenne (tirage aléatoire), pour rester réaliste.",
+        ]}
+      />
+    ),
+  },
   taskAssignmentStrategy: {
     title: "Règle d'affectation des tâches",
     intro:
@@ -491,23 +780,65 @@ export function FactorHelpBody({ factorId }: { factorId: string }) {
           {help.legend}
         </div>
       ) : null}
-      <div className="grid gap-3 sm:grid-cols-2">
-        {help.modes.map((mode) => (
-          <div
-            className="flex flex-col gap-2 rounded-md border border-line p-3"
-            key={mode.label}
-          >
-            {mode.diagram}
-            <div>
-              <div className="text-sm font-semibold text-ink">{mode.label}</div>
-              <div className="text-xs font-medium text-accent">{mode.summary}</div>
-              <p className="mt-1 text-xs leading-relaxed text-slate-600">
-                {mode.detail}
-              </p>
+      {help.body ? (
+        <div className="text-sm leading-relaxed text-slate-600">{help.body}</div>
+      ) : null}
+      {help.modes.length > 0 ? (
+        <div className="grid gap-3 sm:grid-cols-2">
+          {help.modes.map((mode) => (
+            <div
+              className="flex flex-col gap-2 rounded-md border border-line p-3"
+              key={mode.label}
+            >
+              {mode.diagram}
+              <div>
+                <div className="text-sm font-semibold text-ink">{mode.label}</div>
+                <div className="text-xs font-medium text-accent">{mode.summary}</div>
+                <p className="mt-1 text-xs leading-relaxed text-slate-600">
+                  {mode.detail}
+                </p>
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Narrative body component for numeric / structural factors
+// ---------------------------------------------------------------------------
+
+function NarrativeBody({
+  paragraphs,
+  tips,
+  effect,
+}: {
+  paragraphs: string[];
+  tips?: string[];
+  effect?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      {paragraphs.map((p, i) => (
+        <p key={i} className="text-sm leading-relaxed text-slate-600">
+          {p}
+        </p>
+      ))}
+      {effect ? (
+        <div className="rounded-md border border-line bg-slate-50 px-3 py-2 text-xs text-slate-600">
+          <span className="font-semibold text-ink">Effet attendu : </span>
+          {effect}
+        </div>
+      ) : null}
+      {tips && tips.length > 0 ? (
+        <ul className="ml-4 list-disc space-y-1 text-xs leading-relaxed text-slate-600">
+          {tips.map((t, i) => (
+            <li key={i}>{t}</li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }

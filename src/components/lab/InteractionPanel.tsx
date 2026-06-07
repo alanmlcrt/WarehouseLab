@@ -18,6 +18,7 @@ import {
   type RunPoint,
 } from "../../experiments/labKit";
 import { mean } from "../../experiments/labStats";
+import { sortLevels } from "./explorer/explorerModel";
 import { MetricSelect } from "./metrics";
 
 interface InteractionPanelProps {
@@ -43,7 +44,12 @@ function distinctValues(points: RunPoint[], factorId: string): string[] {
       seen.add(String(raw));
     }
   }
-  return [...seen].sort();
+  // Sort numerically for number factors and by declared option order for enums
+  // (e.g. "uniform → abc → pareto"), not alphabetically — otherwise the X axis
+  // shows 10 before 6 and "abc" before "uniform".
+  const factor = getFactorById(factorId);
+  const isNumeric = factor ? factor.type !== "enum" : false;
+  return sortLevels([...seen], isNumeric, factor?.options);
 }
 
 export function InteractionPanel({ points }: InteractionPanelProps) {
@@ -156,6 +162,12 @@ export function InteractionPanel({ points }: InteractionPanelProps) {
   const metricLabel =
     METRIC_COLUMNS.find((column) => column.id === metricId)?.label ?? metricId;
 
+  // Factors that vary beyond the two being crossed: the A×B surface is averaged
+  // over them, which can distort the apparent interaction.
+  const otherVarying = varyingFactors.filter(
+    (factor) => factor.id !== activeA && factor.id !== activeB,
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
       <div className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-white p-3 shadow-sm">
@@ -180,6 +192,17 @@ export function InteractionPanel({ points }: InteractionPanelProps) {
           value={metricId}
         />
       </div>
+
+      {model && otherVarying.length > 0 ? (
+        <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <span className="mr-1 text-amber-700">⚠</span>
+          <span className="font-semibold">Surface moyennée :</span>{" "}
+          {otherVarying.map((f) => f.label).join(", ")}{" "}
+          varie{otherVarying.length > 1 ? "nt" : ""} aussi — l'interaction affichée est
+          moyennée sur ces variations et peut être déformée. Pour une lecture nette,
+          ne fais varier que ces deux facteurs.
+        </div>
+      ) : null}
 
       {!model ? (
         <div className="flex flex-1 items-center justify-center text-sm text-slate-400">

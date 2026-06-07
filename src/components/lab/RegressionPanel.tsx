@@ -28,7 +28,7 @@ interface RegressionPanelProps {
 
 export function RegressionPanel({ points }: RegressionPanelProps) {
   const [target, setTarget] = useState({
-    id: "throughputPerMinute",
+    id: "steadyThroughputPerMinute",
     source: "metric" as "factor" | "metric",
   });
   const [excludedFeatureIds, setExcludedFeatureIds] = useState<string[]>([]);

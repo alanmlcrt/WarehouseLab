@@ -61,6 +61,15 @@ export interface WarehouseSizePreset {
  *  capacity - it stops naturally when no valid positions remain. */
 export const RACK_FILL_SENTINEL = 9999;
 
+/** Max robots the engine allows on a given floor before clamping, to keep the
+ *  grid from jamming. One robot per 4 cells. Shared by the engine clamp and the
+ *  PlanEditor warning so the rule lives in one place. */
+export const ROBOT_DENSITY_CELLS_PER_ROBOT = 4;
+
+export function maxRobotsForArea(width: number, height: number): number {
+  return Math.max(1, Math.floor((width * height) / ROBOT_DENSITY_CELLS_PER_ROBOT));
+}
+
 export const WAREHOUSE_SIZE_PRESETS: Record<string, WarehouseSizePreset> = {
   xs: { label: "XS  (12x10)", width: 12, height: 10 },
   s:  { label: "S   (18x14)", width: 18, height: 14 },
@@ -331,26 +340,15 @@ export const FACTOR_REGISTRY: FactorDef[] = [
     ],
   },
   {
-    id: "skuCount",
-    label: "Nombre de SKU",
-    group: "Storage",
-    path: "storage.skuCount",
-    type: "number",
-    defaultValues: [40, 80, 120],
-    min: 5,
-    max: 500,
-    step: 5,
-  },
-  {
     id: "pathfindingStrategy",
     label: "Pathfinding (aveugle vs trafic)",
     group: "Movement",
     path: "movement.pathfindingStrategy",
     type: "enum",
-    // manhattan = plus court chemin aveugle au trafic ; astar = cout pondere
-    // trafic/attente ; reservation = astar + reservation temporelle (anti-swap,
-    // coordination des couloirs). dijkstra retire : meme cout qu'astar.
-    defaultValues: ["manhattan"],
+    // Default = reservation (A* + booking pre-pass) so studies start from a
+    // properly-coordinated fleet. manhattan/astar restent disponibles pour
+    // étudier la dégradation due à une mauvaise coordination.
+    defaultValues: ["reservation", "astar", "manhattan"],
     options: ["manhattan", "astar", "reservation"],
   },
   {
@@ -368,12 +366,131 @@ export const FACTOR_REGISTRY: FactorDef[] = [
     group: "Movement",
     path: "movement.reroutingPolicy",
     type: "enum",
-    // fixed = 1 seul trajet (bouchons) ; periodic = replan si bloque ;
-    // reactive = recalcul a chaque mouvement (contournement dynamique).
-    defaultValues: ["fixed", "reactive"],
+    // Default = reactive (recalcul permanent) — la flotte fuit la congestion
+    // en continu. fixed/periodic gardés pour étudier la dégradation.
+    defaultValues: ["reactive", "periodic", "fixed"],
     options: ["fixed", "periodic", "reactive"],
   },
 ];
+
+// ---------------------------------------------------------------------------
+// Confound rules — when factor X is varied, these factors MUST stay fixed
+// (single value, context role) otherwise gains can't be attributed to one cause.
+// ---------------------------------------------------------------------------
+
+export interface ConfoundRule {
+  /** Factor whose variation triggers the lock. */
+  trigger: string;
+  /** Factors that get forced into "context" with a single value while trigger varies. */
+  lock: string[];
+  /** Plain-language explanation shown in the banner / tooltip. */
+  why: string;
+}
+
+export const CONFOUND_RULES: ConfoundRule[] = [
+  {
+    trigger: "storageStrategy",
+    lock: ["demandPattern"],
+    why: "Pour isoler l'effet d'une stratégie de stockage, le profil de demande doit rester constant.",
+  },
+  {
+    trigger: "demandPattern",
+    lock: ["ordersPerMinute"],
+    why: "Pour mesurer l'effet d'un profil de demande, fixe l'intensité globale.",
+  },
+  {
+    trigger: "ordersPerMinute",
+    lock: ["peakProfile"],
+    why: "Faire varier la cadence ET le profil de pic mélange régime stationnaire et surcharge transitoire.",
+  },
+  {
+    trigger: "robotCount",
+    lock: ["chargingStationCount"],
+    why: "Pour trouver le R* optimal, garde le nombre de chargeurs fixe — sinon le palier de saturation se déplace pour deux raisons.",
+  },
+  {
+    trigger: "warehouseSize",
+    lock: ["crossAisleSpacing", "levelCount", "pickingStationCount"],
+    why: "Comparer plusieurs tailles d'entrepôt change déjà énormément la géométrie ; fixe les autres paramètres structurels.",
+  },
+];
+
+/** Returns the set of factor ids that should be locked (forced to context, 1 val)
+ *  given the current plan, plus the rules that triggered each lock. */
+export function computeLockedFactors(
+  plan: LabPlan,
+): Map<string, { rule: ConfoundRule; triggerLabel: string }> {
+  const locked = new Map<string, { rule: ConfoundRule; triggerLabel: string }>();
+  const bindings = new Map(plan.bindings.map((b) => [b.factorId, b]));
+  for (const rule of CONFOUND_RULES) {
+    const triggerRole = plan.factorRoles?.[rule.trigger] ?? "variable";
+    const triggerValues = bindings.get(rule.trigger)?.values ?? [];
+    const isVaried = triggerRole === "variable" && triggerValues.length > 1;
+    if (!isVaried) continue;
+    const triggerLabel = getFactorById(rule.trigger)?.label ?? rule.trigger;
+    for (const lockedId of rule.lock) {
+      if (!locked.has(lockedId)) {
+        locked.set(lockedId, { rule, triggerLabel });
+      }
+    }
+  }
+  return locked;
+}
+
+/** Soft confound advisory: the rules now produce a non-blocking warning
+ *  surfaced in the banner. The user is free to vary several factors at once
+ *  (interaction studies need this). This function is kept as a no-op for
+ *  callers that still wrap the plan — the plan stays untouched. */
+export function applyConfoundLocks(plan: LabPlan): LabPlan {
+  return plan;
+}
+
+// ---------------------------------------------------------------------------
+// Required factors — the user MUST pick a value (Fixé or À tester). They
+// cannot be left out via the shelf because the engine's behaviour materially
+// depends on them and falling back to a silent preset default would hide a
+// real decision (e.g. "how many levels does my warehouse have?").
+// ---------------------------------------------------------------------------
+
+export const REQUIRED_FACTOR_IDS: ReadonlySet<string> = new Set([
+  "warehouseSize",
+  "levelCount",
+  "pickingStationCount",
+  "chargingStationCount",
+  "robotCount",
+  "ordersPerMinute",
+  "demandPattern",
+  "storageStrategy",
+  "pathfindingStrategy",
+  "reroutingPolicy",
+]);
+
+export function isRequiredFactor(id: string): boolean {
+  return REQUIRED_FACTOR_IDS.has(id);
+}
+
+/** Normalise a plan so every required factor has at least one value and a
+ *  role (context by default). Used after every mutation to keep the invariant
+ *  even if a saved campaign predates the rule. */
+export function ensureRequiredFactorValues(plan: LabPlan): LabPlan {
+  let mutated = false;
+  const factorRoles = { ...plan.factorRoles };
+  const bindings = plan.bindings.map((binding) => {
+    if (!isRequiredFactor(binding.factorId)) return binding;
+    const factor = getFactorById(binding.factorId);
+    if (!factor) return binding;
+    if (binding.values.length === 0) {
+      mutated = true;
+      factorRoles[binding.factorId] = "context";
+      return {
+        ...binding,
+        values: [factor.defaultValues[0] ?? (factor.min ?? 1)],
+      };
+    }
+    return binding;
+  });
+  return mutated ? { ...plan, factorRoles, bindings } : plan;
+}
 
 export const DEFAULT_ACTIVE_FACTOR_IDS = [
   "warehouseSize",
@@ -386,6 +503,13 @@ export const DEFAULT_ACTIVE_FACTOR_IDS = [
   "storageStrategy",
 ];
 
+export type MetricGroup =
+  | "Performance"
+  | "Efficacité"
+  | "Coût"
+  | "Stockage"
+  | "Batterie";
+
 export const METRIC_COLUMNS: Array<{
   id: string;
   label: string;
@@ -393,41 +517,44 @@ export const METRIC_COLUMNS: Array<{
   /** True for metrics that directly mirror an input factor or layout parameter.
    *  They vary when a config param changes but are not performance outcomes. */
   structural?: true;
-  /** True for the ~10 KPIs that matter most — shown in dropdowns by default. */
+  /** True for the KPIs that matter most — shown in dropdowns by default. */
   essential?: true;
+  /** Theme used to group the metric in dropdowns (essential metrics only). */
+  group?: MetricGroup;
 }> = [
   { id: "derivedMaxBattery", label: "Capacité batterie (dérivée)", unit: "énergie", structural: true },
-  { id: "effectiveRackCount", label: "Racks réels", structural: true },
-  { id: "rackDensityPct", label: "Densité racks", unit: "%", structural: true },
+  { id: "effectiveRackCount", label: "Emplacements de stockage", unit: "racks", structural: true, essential: true, group: "Stockage" },
+  { id: "rackDensityPct", label: "Densité de stockage", unit: "%", structural: true },
   { id: "warehouseWidth", label: "Largeur réelle", unit: "cellules", structural: true },
   { id: "warehouseHeight", label: "Profondeur réelle", unit: "cellules", structural: true },
-  { id: "steadyThroughputPerMinute", label: "Débit steady-state", unit: "caisses/min", essential: true },
-  { id: "throughputPerMinute", label: "Débit (fenêtre 60s)", unit: "caisses/min", essential: true },
+  { id: "steadyThroughputPerMinute", label: "Débit", unit: "caisses/min", essential: true, group: "Performance" },
+  { id: "throughputPerMinute", label: "Débit instantané (60s)", unit: "caisses/min" },
   { id: "demandPerMinute", label: "Demande", unit: "caisses/min" },
-  { id: "feasibilityMargin", label: "Marge faisabilité" },
+  { id: "feasibilityMargin", label: "Marge de capacité", unit: "ratio", essential: true, group: "Performance" },
   { id: "steadyUtilization", label: "Utilisation steady-state", unit: "ratio" },
-  { id: "steadyBacklog", label: "Backlog moyen", unit: "commandes", essential: true },
-  { id: "serviceLevel", label: "Taux de service", unit: "%", essential: true },
-  { id: "throughputPerRobot", label: "Débit / robot", unit: "caisses/min/robot", essential: true },
+  { id: "steadyBacklog", label: "Backlog moyen", unit: "commandes", essential: true, group: "Performance" },
+  { id: "serviceLevel", label: "Taux de service", unit: "%", essential: true, group: "Performance" },
+  { id: "throughputPerRobot", label: "Débit / robot", unit: "caisses/min/robot", essential: true, group: "Performance" },
   { id: "backlogRatio", label: "Ratio backlog" },
   { id: "effectiveRobotCount", label: "Parc effectif", unit: "robots", structural: true },
-  { id: "costProxy", label: "Coût (proxy CAPEX)", unit: "unités", essential: true },
-  { id: "averageProcessingTime", label: "Temps moyen commande", unit: "s" },
-  { id: "averageRobotUtilization", label: "Occupation robots", unit: "ratio", essential: true },
-  { id: "averageDistancePerOrder", label: "Distance / commande", essential: true },
+  { id: "costProxy", label: "Coût (indicatif)", unit: "unités", essential: true, group: "Coût" },
+  { id: "averageProcessingTime", label: "Temps moyen / commande", unit: "s", essential: true, group: "Performance" },
+  { id: "averageRobotUtilization", label: "Occupation robots", unit: "ratio", essential: true, group: "Efficacité" },
+  { id: "averageDistancePerOrder", label: "Distance / commande", essential: true, group: "Efficacité" },
   { id: "totalDistance", label: "Distance totale" },
   { id: "completedOrders", label: "Caisses livrées" },
   { id: "pendingOrders", label: "Backlog final" },
-  { id: "congestionEvents", label: "Congestion", essential: true },
+  { id: "congestionEvents", label: "Congestion", essential: true, group: "Efficacité" },
   { id: "connectorTraffic", label: "Trafic connecteur" },
   { id: "connectorWait", label: "Attente connecteur" },
   { id: "energyConsumed", label: "Énergie totale" },
-  { id: "energyPerOrder", label: "Énergie / commande", essential: true },
+  { id: "energyPerOrder", label: "Énergie / commande", essential: true, group: "Efficacité" },
   { id: "chargingShare", label: "Part en recharge" },
   { id: "chargeSessions", label: "Sessions charge" },
+  { id: "depletionEvents", label: "Pannes batterie", essential: true, group: "Batterie" },
   { id: "averageBatteryLevel", label: "Batterie moyenne" },
   { id: "minimumBatteryLevel", label: "Batterie min" },
-  { id: "slottingEfficiency", label: "Qualité slotting", essential: true },
+  { id: "slottingEfficiency", label: "Qualité du rangement", essential: true, group: "Stockage" },
   { id: "demandWeightedStorageDistance", label: "Distance pondérée" },
   { id: "fastMovingStorageDistance", label: "Distance SKU rapides" },
   { id: "elevatorTrips", label: "Trajets verticaux" },
@@ -536,7 +663,7 @@ export function buildDefaultLabPlan(): LabPlan {
     "chargingStationCount",
     "levelCount",
   ]);
-  return {
+  const built: LabPlan = {
     seedCount: 50,
     simulatedMinutes: 3,
     warmupMinutes: 1,
@@ -570,6 +697,8 @@ export function buildDefaultLabPlan(): LabPlan {
               : [],
     })),
   };
+  // Guarantee every required factor has a value, even if it was missed above.
+  return ensureRequiredFactorValues(built);
 }
 
 /** Number of distinct factor combinations = full factorial of every active
@@ -602,16 +731,19 @@ export async function runLab({
   const points: RunPoint[] = [];
   const totalRuns = combinations.length * seedCount;
   let completed = 0;
+  // The loop runs on the main thread. Reporting progress + yielding after every
+  // single run forced one React re-render + repaint per run, which dwarfed the
+  // ~20 ms of actual compute (the engine alone does ~50 runs/s). Throttle both
+  // to ~60 ms wall-clock so the UI stays responsive without paying a render tax
+  // on every run.
+  const PROGRESS_INTERVAL_MS = 60;
+  let lastTick = performance.now();
+  onProgress?.({ completedRuns: 0, totalRuns, currentLabel: "Démarrage…" });
 
   for (const combination of combinations) {
     for (let seedIndex = 0; seedIndex < seedCount; seedIndex += 1) {
       const config = applyCombination(baseConfig, combination, seedIndex);
       const label = buildLabel(combination, seedIndex);
-      onProgress?.({
-        completedRuns: completed,
-        totalRuns,
-        currentLabel: label,
-      });
 
       const engine = new SimulationEngine(config);
       for (let tick = 0; tick < ticksPerRun; tick += 1) {
@@ -644,7 +776,22 @@ export async function runLab({
         id: `${label}-${seedIndex + 1}`,
         seedIndex,
         factors: Object.fromEntries(
-          combination.map((entry) => [entry.factorId, entry.value]),
+          combination.map((entry) => {
+            // Record the EFFECTIVE value the engine actually ran with (read back
+            // from the config after applyCombination), not the requested one.
+            // This matters when a value is silently adjusted — e.g. robotCount
+            // clamped to the floor-density cap — so charts and regression don't
+            // treat clamped duplicates as distinct levels. Compound factors keep
+            // their categorical value (warehouseSize="s", peakProfile="moderate").
+            const factor = getFactorById(entry.factorId);
+            if (factor && !factor.compound && factor.path !== "_compound") {
+              const effective = getByPath(config, factor.path);
+              if (effective !== undefined) {
+                return [entry.factorId, effective];
+              }
+            }
+            return [entry.factorId, entry.value];
+          }),
         ),
         metrics: {
           ...metrics,
@@ -658,7 +805,16 @@ export async function runLab({
       };
       points.push(point);
       completed += 1;
-      await yieldToBrowser();
+
+      // Only surface progress + hand control back to the browser every
+      // ~60 ms, not every run — that's what keeps the UI alive without one
+      // re-render/repaint per simulation.
+      const now = performance.now();
+      if (now - lastTick >= PROGRESS_INTERVAL_MS) {
+        onProgress?.({ completedRuns: completed, totalRuns, currentLabel: label });
+        await yieldToBrowser();
+        lastTick = now;
+      }
     }
   }
 
@@ -769,8 +925,10 @@ function applyCombination(
 
   // Clamp robotCount to a sensible density relative to warehouse floor area
   // so extreme combinations don't jam the grid with hundreds of robots.
-  const floorCells = config.warehouse.width * config.warehouse.height;
-  const maxRobotsForFloor = Math.floor(floorCells / 4);
+  const maxRobotsForFloor = maxRobotsForArea(
+    config.warehouse.width,
+    config.warehouse.height,
+  );
   if (config.robots.robotCount > maxRobotsForFloor) {
     config.robots.robotCount = Math.max(1, maxRobotsForFloor);
   }
@@ -796,6 +954,18 @@ function setByPath(target: any, path: string, value: FactorValue): void {
     cursor = cursor[segments[index]];
   }
   cursor[segments[segments.length - 1]] = value;
+}
+
+function getByPath(target: any, path: string): FactorValue | undefined {
+  const segments = path.split(".");
+  let cursor = target;
+  for (const segment of segments) {
+    if (cursor == null) {
+      return undefined;
+    }
+    cursor = cursor[segment];
+  }
+  return cursor as FactorValue | undefined;
 }
 
 export interface SteadyStateMetrics {
@@ -909,6 +1079,7 @@ function flattenMetrics(
       metrics.chargingTicks /
       Math.max(1, metrics.completedOrders + metrics.pendingOrders),
     chargeSessions: metrics.chargeSessions,
+    depletionEvents: metrics.depletionEvents,
     averageBatteryLevel: metrics.averageBatteryLevel,
     minimumBatteryLevel: metrics.minimumBatteryLevel,
     slottingEfficiency: metrics.slottingEfficiency,
@@ -937,13 +1108,18 @@ function yieldToBrowser(): Promise<void> {
   });
 }
 
-/** Metrics shown in comparison dropdowns: essential KPIs only, non-structural,
- *  AND varying in the dataset. Falls back to the essential list when dataset is empty. */
+/** Metrics shown in comparison dropdowns: essential KPIs AND structural
+ *  quantities that vary across the dataset (storage capacity, dimensions...).
+ *  Structural metrics are useful as Y axes when the user compares geometry
+ *  changes — they expose the design trade-off (e.g. more aisles = fewer racks).
+ *  Falls back to the essential list when the dataset is empty. */
 export function getActiveMetricColumns(
   points: RunPoint[],
 ): typeof METRIC_COLUMNS {
-  const essentials = METRIC_COLUMNS.filter((col) => col.essential && !col.structural);
-  if (points.length === 0) return essentials;
+  const essentials = METRIC_COLUMNS.filter((col) => col.essential);
+  if (points.length === 0) {
+    return essentials.filter((col) => !col.structural);
+  }
   return essentials.filter((col) => {
     const first = points[0].metrics[col.id];
     return points.some((p) => p.metrics[col.id] !== first);

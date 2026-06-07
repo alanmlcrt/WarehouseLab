@@ -59,11 +59,14 @@ const baseConfig: SimulationConfig = {
     familyGroupingEnabled: false,
   },
   movement: {
-    pathfindingStrategy: "manhattan",
+    // Default movement stack = properly coordinated fleet. Avoids swap
+    // deadlocks (reservation) and lets robots dodge live congestion (reactive).
+    // Studies wanting to expose the degradation can downgrade to manhattan+fixed.
+    pathfindingStrategy: "reservation",
     taskAssignmentStrategy: "nearestRobot",
-    reroutingPolicy: "periodic",
+    reroutingPolicy: "reactive",
     collisionAvoidance: true,
-    temporalReservation: false,
+    temporalReservation: true,
     trafficMode: "autonomous",
   },
   seeds: buildSeedsFromMaster(1234),

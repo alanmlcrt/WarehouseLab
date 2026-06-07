@@ -219,7 +219,8 @@ Definitions:
 - `averageBatteryLevel`: niveau moyen de batterie instantane.
 - `minimumBatteryLevel`: plus bas niveau de batterie instantane observe sur la flotte.
 - `chargingShare`: `chargingTicks / (robotCount * ticksSimules)`.
+- `depletionEvents` (KPI « Pannes batterie »): nombre cumule de robots tombes en panne seche (batterie a 0) en pleine tache. La commande repart en file et le robot est immobilise le temps d'un secours/recharge. C'est la metrique qui rend l'autonomie reellement contraignante: elle vaut 0 quand l'autonomie est suffisante et grimpe quand elle (ou le seuil de recharge) est sous-dimensionnee.
 
-Utilite: quantifier le compromis entre autonomie embarquee, poids batterie, chargeurs disponibles et interruption operationnelle.
+Utilite: quantifier le compromis entre autonomie embarquee, poids batterie, chargeurs disponibles et interruption operationnelle. `depletionEvents` donne directement le seuil d'autonomie sur en tracant les pannes contre `maxBattery`.
 
 Affichage: panneau `Batterie et recharge` dans l'onglet Research, export CSV et rapports Markdown.

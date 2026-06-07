@@ -26,6 +26,7 @@ export function createEmptyMetrics(): SimulationMetrics {
     elevatorTrips: 0,
     elevatorRideTicks: 0,
     elevatorWaitTicks: 0,
+    depletionEvents: 0,
     averageBatteryLevel: 0,
     minimumBatteryLevel: 0,
     demandWeightedStorageDistance: 0,
@@ -46,10 +47,23 @@ export interface MetricsInput {
   previousSeries: MetricSample[];
   completedThisTick: number;
   congestionEvents: number;
+  depletionEvents: number;
   connectorTraffic: number;
   connectorWait: number;
   warehouse: Warehouse;
+  /** Pre-computed, run-invariant slotting metrics. The SKU placement is fixed
+   *  once the warehouse is built, so recomputing it every tick is pure waste —
+   *  the engine computes it once and passes it here. */
+  slotting?: SlottingMetrics;
 }
+
+export type SlottingMetrics = Pick<
+  SimulationMetrics,
+  | "demandWeightedStorageDistance"
+  | "fastMovingStorageDistance"
+  | "slowMovingStorageDistance"
+  | "slottingEfficiency"
+>;
 
 export function calculateMetrics(input: MetricsInput): SimulationMetrics {
   const totalDistance = input.robots.reduce(
@@ -131,7 +145,7 @@ export function calculateMetrics(input: MetricsInput): SimulationMetrics {
     congestionEvents: input.congestionEvents,
     throughputPerMinute,
   };
-  const slotting = calculateSlottingMetrics(input.warehouse);
+  const slotting = input.slotting ?? calculateSlottingMetrics(input.warehouse);
 
   return {
     completedOrders,
@@ -152,6 +166,7 @@ export function calculateMetrics(input: MetricsInput): SimulationMetrics {
     elevatorTrips,
     elevatorRideTicks,
     elevatorWaitTicks,
+    depletionEvents: input.depletionEvents,
     averageBatteryLevel,
     minimumBatteryLevel,
     demandWeightedStorageDistance: slotting.demandWeightedStorageDistance,
@@ -165,15 +180,9 @@ export function calculateMetrics(input: MetricsInput): SimulationMetrics {
   };
 }
 
-function calculateSlottingMetrics(
+export function calculateSlottingMetrics(
   warehouse: Warehouse,
-): Pick<
-  SimulationMetrics,
-  | "demandWeightedStorageDistance"
-  | "fastMovingStorageDistance"
-  | "slowMovingStorageDistance"
-  | "slottingEfficiency"
-> {
+): SlottingMetrics {
   const locationById = new Map(
     warehouse.storageLocations.map((location) => [location.id, location]),
   );

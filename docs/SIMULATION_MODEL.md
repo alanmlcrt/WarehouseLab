@@ -25,7 +25,9 @@ La simulation avance par ticks discrets. Chaque tick:
 
 ## Robots
 
-Les robots du MVP transportent une commande a la fois. Ils passent par les etats `idle`, `movingToPick`, `picking`, `movingToDropoff`, `droppingOff`, `charging`, `waiting`, `failed`.
+Les robots du MVP transportent une commande a la fois. Ils passent par les etats `idle`, `movingToPick`, `picking`, `movingToDropoff`, `droppingOff`, `movingToElevator`, `ridingElevator`, `movingToCharger`, `charging`, `waiting`, `failed`, `depleted`.
+
+L'etat `depleted` correspond a une panne seche: un robot dont la batterie atteint 0 en pleine tache s'immobilise, rend sa commande a la file, et reste hors-service le temps d'un secours/recharge (proportionnel a `rechargeTicks`) avant de repartir batterie pleine.
 
 ## Commandes Et Caisses
 
@@ -91,7 +93,7 @@ Le routage vertical MVP fonctionne ainsi:
 La simulation cumule maintenant les trajets verticaux, les ticks de trajet et les ticks d'attente associes aux acces verticaux. Ces signaux alimentent `verticalPressure`, puis le Vertical Topology Study du Research Lab.
 5. Le robot reprend un trajet horizontal au niveau cible.
 
-Les allees d'ascenseur sont traitees comme des couloirs a capacite elevee dans le MVP. La reservation fine et les files d'attente realistes restent a implementer.
+**Capacite des cabines.** Chaque couloir vertical (`ElevatorZone`) modelise une cabine unique: un seul robot la traverse a la fois (`busy` / `reservedBy`). Un robot qui arrive a une cabine occupee attend a la cellule d'acces et reessaie au tick suivant; son attente est comptee dans la congestion. Le choix de cabine penalise les cabines occupees pour repartir la flotte entre les couloirs. Plusieurs couloirs (derives de la largeur) fournissent donc plusieurs cabines en parallele. Un robot qui tombe en panne ou est libere pendant un trajet relache sa cabine pour ne pas la verrouiller.
 
 ## Pathfinding
 
@@ -104,6 +106,10 @@ Plusieurs strategies sont disponibles via `movement.pathfindingStrategy`:
 
 La politique de re-routage (`reroutingPolicy`) controle la frequence de recalcul: `fixed` (un seul trajet), `periodic` (replan si bloque), `reactive` (recalcul a chaque mouvement).
 
+**Defaut.** Le preset de base et le Lab demarrent en `reservation` + `reactive`: c'est la combinaison qui evite les blocages d'echange (swap deadlocks) et donne des courbes de saturation exploitables. `manhattan` / `fixed` restent disponibles pour etudier la degradation due a une mauvaise coordination.
+
+**Planification autour des robots.** La recherche de chemin traite la position courante de *tous* les robots comme obstacle (pas seulement les robots a l'arret). C'est volontaire: sous A* pondere-trafic + reservation, planifier autour des positions courantes est une coordination proactive qui repartit la flotte entre les allees. Un test A/B a confirme qu'ignorer les robots en mouvement effondre le debit (~3x) — voir le commentaire de `getOccupiedCells`.
+
 ## Collisions Et Reservation Temporelle
 
 Par defaut, les conflits sont evites par occupation de cellule au tick courant: si la prochaine cellule est occupee ou deja reservee par un robot ayant bouge ce tick, le robot attend et accumule du temps d'attente.
@@ -112,12 +118,14 @@ Quand `movement.temporalReservation` est actif (ou que la strategie est `reserva
 
 ## Batterie, Poids Et Pannes
 
-La configuration robot inclut `baseWeightKg`, `batteryWeightKg` et `payloadKg`. Dans le Capacity Study et le Battery Strategy Study, une batterie plus grosse augmente l'autonomie mais augmente aussi `energyPerCell` par effet de masse. La simulation mesure les ticks de charge, les sessions de charge, la batterie moyenne et la batterie minimale pour scorer le compromis entre petite batterie, charge plus frequente et interruption operationnelle. Les courbes de charge restent lineaires; degradation batterie, courant de pointe et temperature ne sont pas encore modelises. Les pannes peuvent remettre une commande en attente et immobiliser un robot. Le temps de reparation n'est plus constant: il est tire selon une loi exponentielle autour de `meanFailureTicks` (MTTR), via `failureRng`, donc reproductible. La recharge s'arrete des que la batterie est pleine (duree proportionnelle au deficit).
+La configuration robot inclut `baseWeightKg`, `batteryWeightKg` et `payloadKg`. Dans le Capacity Study et le Battery Strategy Study, une batterie plus grosse augmente l'autonomie mais augmente aussi `energyPerCell` par effet de masse. La simulation mesure les ticks de charge, les sessions de charge, la batterie moyenne et la batterie minimale pour scorer le compromis entre petite batterie, charge plus frequente et interruption operationnelle. Les courbes de charge restent lineaires; degradation batterie, courant de pointe et temperature ne sont pas encore modelises.
+
+**La batterie est une contrainte dure.** Un robot inactif passe sous `rechargeThreshold` part recharger. Mais un robot qui prend une mission juste au-dessus du seuil peut se vider en cours de route: s'il atteint 0, il passe en `depleted` (panne seche, voir section Robots) et sa commande repart en file. Le compteur `depletionEvents` (KPI « Pannes batterie ») remonte ces evenements: un chiffre eleve signale une autonomie ou un seuil mal dimensionnes. Une autonomie suffisante ramene ce compteur a zero.
+
+Les pannes peuvent remettre une commande en attente et immobiliser un robot. Le temps de reparation n'est plus constant: il est tire selon une loi exponentielle autour de `meanFailureTicks` (MTTR), via `failureRng`, donc reproductible. La recharge s'arrete des que la batterie est pleine (duree proportionnelle au deficit).
 
 ## Seeds
 
-- `layoutSeed`: placement initial des SKU.
-- `demandSeed`: generation des commandes.
-- `failureSeed`: pannes et incidents futurs.
+La config porte huit sous-seeds independants: `layoutSeed`, `skuCatalogSeed`, `stationSeed`, `robotSpawnSeed`, `demandSeed`, `trafficSeed`, `batterySeed`, `failureSeed`. Dans le Lab, chaque repetition (seed) decale ces huit seeds de facon decorrelee: une repetition est donc un entrepot physiquement different (placement, mix SKU demande, pannes), ce qui en fait une vraie replication statistique — pas une simple re-mesure.
 
-Deux simulations avec la meme configuration et les memes seeds doivent produire les memes resultats.
+Deux simulations avec la meme configuration et les memes seeds produisent les memes resultats (aucun `Math.random()` dans le moteur).

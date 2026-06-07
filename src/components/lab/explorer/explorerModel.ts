@@ -70,10 +70,28 @@ export function distinctValues(points: RunPoint[], factorId: string): string[] {
   return [...seen];
 }
 
-export function sortLevels(values: string[], numeric: boolean): string[] {
-  return [...values].sort((a, b) =>
-    numeric ? Number(a) - Number(b) : a.localeCompare(b),
-  );
+export function sortLevels(
+  values: string[],
+  numeric: boolean,
+  /** For enums: canonical option order (e.g. ["none","moderate","intense"]).
+   *  Values not in `order` are pushed to the end alphabetically. */
+  order?: readonly string[],
+): string[] {
+  if (numeric) {
+    return [...values].sort((a, b) => Number(a) - Number(b));
+  }
+  if (order && order.length > 0) {
+    const rank = new Map(order.map((opt, i) => [opt, i]));
+    return [...values].sort((a, b) => {
+      const ra = rank.get(a);
+      const rb = rank.get(b);
+      if (ra !== undefined && rb !== undefined) return ra - rb;
+      if (ra !== undefined) return -1;
+      if (rb !== undefined) return 1;
+      return a.localeCompare(b);
+    });
+  }
+  return [...values].sort((a, b) => a.localeCompare(b));
 }
 
 /** Linear-interpolation quantile on an ascending-sorted array. */
@@ -124,7 +142,11 @@ export function buildSeries(
   colorFactor: FactorDef | null,
 ): ExplorerSeries {
   const xIsNumeric = xFactor.type !== "enum";
-  const xLevels = sortLevels(distinctValues(points, xFactor.id), xIsNumeric);
+  const xLevels = sortLevels(
+    distinctValues(points, xFactor.id),
+    xIsNumeric,
+    xFactor.options,
+  );
   const xIndexOf = (raw: unknown): number =>
     xIsNumeric ? Number(raw) : xLevels.indexOf(String(raw));
 
@@ -157,7 +179,11 @@ export function buildSeries(
   }
 
   const groups = colorFactor
-    ? [...buckets.keys()].sort()
+    ? sortLevels(
+        [...buckets.keys()],
+        colorFactor.type !== "enum",
+        colorFactor.options,
+      )
     : [SINGLE_GROUP];
 
   const statsByGroup = new Map<string, LevelStat[]>();

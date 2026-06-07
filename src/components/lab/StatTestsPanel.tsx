@@ -27,6 +27,7 @@ import {
   mean,
   median,
 } from "../../experiments/labStats";
+import { sortLevels } from "./explorer/explorerModel";
 import { MetricSelect } from "./metrics";
 
 interface StatTestsPanelProps {
@@ -64,11 +65,26 @@ export function StatTestsPanel({ points }: StatTestsPanelProps) {
       ? factorId
       : groupingFactors[0]?.id ?? "";
 
+  // Other factors that also vary in this dataset. When present, the test below
+  // is a MARGINAL effect (averaged over their variation), which can mask or
+  // exaggerate the real effect of the tested factor.
+  const confoundingFactors = useMemo(
+    () => groupingFactors.filter((factor) => factor.id !== activeFactorId),
+    [groupingFactors, activeFactorId],
+  );
+
   const analysis = useMemo(() => {
     if (!activeFactorId) {
       return null;
     }
-    const levels = distinctFactorValues(points, activeFactorId).sort();
+    // Same ordering policy as the Explorer: numeric ascending, enums in declared
+    // option order — never raw alphabetical.
+    const factor = getFactorById(activeFactorId);
+    const levels = sortLevels(
+      distinctFactorValues(points, activeFactorId),
+      factor ? factor.type !== "enum" : false,
+      factor?.options,
+    );
     const groups = levels.map((level) => {
       const values: number[] = [];
       for (const point of points) {
@@ -150,6 +166,19 @@ export function StatTestsPanel({ points }: StatTestsPanelProps) {
           value={metricId}
         />
       </div>
+
+      {test && confoundingFactors.length > 0 ? (
+        <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <span className="mr-1 text-amber-700">⚠</span>
+          <span className="font-semibold">Effet marginal :</span>{" "}
+          {confoundingFactors.map((f) => f.label).join(", ")}{" "}
+          varie{confoundingFactors.length > 1 ? "nt" : ""} aussi dans ce jeu de données.
+          Ce test moyenne l'effet de{" "}
+          <span className="font-medium">{getFactorById(activeFactorId)?.label}</span>{" "}
+          sur ces variations — leur variance peut masquer ou exagérer l'effet réel.
+          Pour un test net, ne fais varier qu'un facteur à la fois.
+        </div>
+      ) : null}
 
       {!test ? (
         <div className="flex flex-1 items-center justify-center text-sm text-slate-400">

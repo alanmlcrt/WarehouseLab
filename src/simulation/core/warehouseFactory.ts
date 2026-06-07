@@ -37,6 +37,7 @@ export function buildWarehouse(
     config.warehouse.pickingStationCount,
     config.warehouse.pickingStationOrientation,
     stationRng,
+    config.warehouse.pickingStationLaneCount,
   );
   const chargingStations = createChargingStations(
     config.warehouse.width,
@@ -55,10 +56,14 @@ export function buildWarehouse(
   );
 
   for (const station of pickingStations) {
-    setCell(cells, station.accessPosition, {
-      type: "station",
-      stationId: station.id,
-    });
+    // Mark every lane of the station as a "station" cell — robots dropping off
+    // can use any of them.
+    for (const cell of station.accessPositions) {
+      setCell(cells, cell, {
+        type: "station",
+        stationId: station.id,
+      });
+    }
   }
 
   for (const charger of chargingStations) {
@@ -147,6 +152,7 @@ function createPickingStations(
   count: number,
   orientation: SimulationConfig["warehouse"]["pickingStationOrientation"],
   rng: SeededRandom,
+  laneCount: number = 2,
 ): PickingStation[] {
   const aisleColumns = computeAisleLayout(width).aisleColumns;
   const stationOrderOffset = count > 0 ? rng.int(0, Math.max(0, count - 1)) : 0;
@@ -183,11 +189,44 @@ function createPickingStations(
         ? { x: accessPosition.x, y: height }
         : { x: -1, y: accessPosition.y };
 
+    // Generate `laneCount` access cells side by side along the building edge,
+    // clamped to the inner grid. This spreads dropoff queueing across cells
+    // instead of choking on a single one.
+    const lanes = Math.max(1, Math.round(laneCount));
+    const accessPositions: GridPosition[] = [];
+    for (let lane = 0; lane < lanes; lane += 1) {
+      // Alternate +1, -1, +2, -2 around the centre so the spread stays balanced.
+      const offset = lane === 0 ? 0 : Math.ceil(lane / 2) * (lane % 2 === 1 ? 1 : -1);
+      const candidate =
+        orientation === "width"
+          ? { x: accessPosition.x + offset, y: accessPosition.y }
+          : { x: accessPosition.x, y: accessPosition.y + offset };
+      const xMin = orientation === "width" ? 0 : 1;
+      const xMax = orientation === "width" ? width - 1 : 1;
+      const yMin = 1;
+      const yMax = height - 2;
+      if (
+        candidate.x >= xMin &&
+        candidate.x <= xMax &&
+        candidate.y >= yMin &&
+        candidate.y <= yMax &&
+        !accessPositions.some(
+          (existing) => existing.x === candidate.x && existing.y === candidate.y,
+        )
+      ) {
+        accessPositions.push(candidate);
+      }
+    }
+    if (accessPositions.length === 0) {
+      accessPositions.push(accessPosition);
+    }
+
     return {
       id: `STATION_${index + 1}`,
       name: `Station ${index + 1}`,
       position,
-      accessPosition,
+      accessPosition: accessPositions[0],
+      accessPositions,
       queueLength: 0,
       processedOrders: 0,
       active: false,

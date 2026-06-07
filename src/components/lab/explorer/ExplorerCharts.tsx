@@ -29,7 +29,14 @@ export interface ChartProps {
   colorOf: (group: string) => string;
   /** Facet mode: tighter margins, no axis titles (the facet heading carries them). */
   compact?: boolean;
+  /** Optional secondary Y series plotted on a right-side axis (dual-axis trade-off). */
+  series2?: ExplorerSeries | null;
+  y2AxisLabel?: string;
 }
+
+/** Distinct hue for the secondary Y axis — uses amber to contrast with the
+ *  teal/blue palette of the primary series. */
+const Y2_COLOR = "#d97706";
 
 function deterministicJitter(key: string, amplitude: number): number {
   if (amplitude <= 0) return 0;
@@ -42,6 +49,30 @@ function deterministicJitter(key: string, amplitude: number): number {
 
 function axisFont(compact?: boolean) {
   return compact ? 10 : 12;
+}
+
+/** Y domain centred on the per-group means (± std), so outliers in the raw
+ *  cloud don't crush the mean line into a flat band. Cloud points that fall
+ *  outside the domain are clipped via `allowDataOverflow` on the axis. */
+function meanCenteredYDomain(
+  series: ExplorerSeries,
+): [number | string, number | string] {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const stats of series.statsByGroup.values()) {
+    for (const s of stats) {
+      const band = Number.isFinite(s.std) ? s.std : 0;
+      if (s.mean - band < lo) lo = s.mean - band;
+      if (s.mean + band > hi) hi = s.mean + band;
+    }
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return ["auto", "auto"];
+  if (hi === lo) {
+    const bump = Math.max(Math.abs(hi) * 0.05, 1);
+    return [lo - bump, hi + bump];
+  }
+  const pad = (hi - lo) * 0.12;
+  return [lo - pad, hi + pad];
 }
 
 function emptyState(message: string) {
@@ -57,7 +88,7 @@ function emptyState(message: string) {
 // ---------------------------------------------------------------------------
 
 export function TrendChart(props: ChartProps) {
-  const { series, xAxisLabel, yAxisLabel, colorOf, compact } = props;
+  const { series, xAxisLabel, yAxisLabel, colorOf, compact, series2, y2AxisLabel } = props;
   if (series.count === 0) return emptyState("Aucun point exploitable.");
 
   const numericLevels = series.xLevels.map(Number);
@@ -69,6 +100,9 @@ export function TrendChart(props: ChartProps) {
   const jitterAmp = series.xLevels.length <= 12 ? minGap * 0.16 : 0;
 
   const fz = axisFont(compact);
+  const yDomain = meanCenteredYDomain(series);
+  const hasSecondary = !!series2 && series2.count > 0;
+  const y2Domain = hasSecondary ? meanCenteredYDomain(series2) : undefined;
 
   return (
     <ResponsiveContainer height="100%" width="100%">
@@ -97,7 +131,9 @@ export function TrendChart(props: ChartProps) {
           type="number"
         />
         <YAxis
+          allowDataOverflow
           dataKey="y"
+          domain={yDomain}
           label={
             compact
               ? undefined
@@ -115,7 +151,34 @@ export function TrendChart(props: ChartProps) {
           tickFormatter={(v: number) => formatNumber(v)}
           type="number"
           width={compact ? 40 : 64}
+          yAxisId="left"
         />
+        {hasSecondary ? (
+          <YAxis
+            allowDataOverflow
+            dataKey="y"
+            domain={y2Domain}
+            label={
+              compact
+                ? undefined
+                : {
+                    value: y2AxisLabel,
+                    angle: 90,
+                    position: "insideRight",
+                    fill: Y2_COLOR,
+                    fontSize: 12,
+                    style: { textAnchor: "middle" },
+                  }
+            }
+            orientation="right"
+            stroke={Y2_COLOR}
+            tick={{ fontSize: fz, fill: Y2_COLOR }}
+            tickFormatter={(v: number) => formatNumber(v)}
+            type="number"
+            width={compact ? 40 : 64}
+            yAxisId="right"
+          />
+        ) : null}
         <ZAxis dataKey="z" domain={[1, 4]} range={[compact ? 18 : 30, compact ? 90 : 220]} />
         <Tooltip
           content={<PointTooltip {...props} />}
@@ -140,6 +203,7 @@ export function TrendChart(props: ChartProps) {
               fill={color}
               fillOpacity={0.2}
               isAnimationActive={false}
+              yAxisId="left"
             />
           );
         })}
@@ -164,9 +228,44 @@ export function TrendChart(props: ChartProps) {
               lineType="joint"
               stroke="#ffffff"
               strokeWidth={1.5}
+              yAxisId="left"
             />
           );
         })}
+        {hasSecondary
+          ? series2!.groups.map((group) => {
+              // Secondary axis: aggregate dashed line — no raw cloud, no per-color split.
+              // We only plot the GRAND mean per X level (across all secondary groups)
+              // because the secondary metric is meant as context, not a full breakdown.
+              const stats = series2!.statsByGroup.get(group) ?? [];
+              const meanData = stats.map((s) => ({
+                x: s.xValue,
+                y: s.mean,
+                z: 4,
+                xLabel: s.xLabel,
+                group,
+                stat: s,
+              }));
+              return (
+                <Scatter
+                  key={`mean2-${group}`}
+                  data={meanData}
+                  fill={Y2_COLOR}
+                  fillOpacity={0.95}
+                  isAnimationActive={false}
+                  line={{
+                    stroke: Y2_COLOR,
+                    strokeWidth: 2,
+                    strokeDasharray: "5 4",
+                  }}
+                  lineType="joint"
+                  stroke="#ffffff"
+                  strokeWidth={1.5}
+                  yAxisId="right"
+                />
+              );
+            })
+          : null}
       </ScatterChart>
     </ResponsiveContainer>
   );
@@ -189,6 +288,7 @@ export function ScatterCloud(props: ChartProps) {
       })()
     : 0.16;
   const fz = axisFont(compact);
+  const yDomain = meanCenteredYDomain(series);
 
   return (
     <ResponsiveContainer height="100%" width="100%">
@@ -229,7 +329,9 @@ export function ScatterCloud(props: ChartProps) {
           type="number"
         />
         <YAxis
+          allowDataOverflow
           dataKey="y"
+          domain={yDomain}
           label={
             compact
               ? undefined
