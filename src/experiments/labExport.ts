@@ -4,6 +4,11 @@ import {
   type LabPlan,
   type RunPoint,
 } from "./labKit";
+import {
+  buildRobotOptimizationModel,
+  formatRobotFormula,
+  predictRobotsFromFormula,
+} from "./fleetOptimizer";
 import { interpretEpsilonSquared, kruskalWallis } from "./labStats";
 
 /** A reproducible research campaign: the DOE plan, its result cloud, and
@@ -173,6 +178,39 @@ export function toMarkdownReport(campaign: LabCampaign): string {
     for (const [key, value] of Object.entries(best.factors)) {
       const label = getFactorById(key)?.label ?? key;
       lines.push(`| ${label} | ${value} |`);
+    }
+  }
+  lines.push("");
+
+  lines.push("## Formule robots R*");
+  lines.push("");
+  const robotModel = buildRobotOptimizationModel(results);
+  if (robotModel.contexts.length === 0) {
+    lines.push(
+      "_Le nombre de robots n'a pas ete varie dans cette campagne : aucune courbe R* exploitable._",
+    );
+  } else {
+    if (robotModel.formula) {
+      lines.push(`Formule empirique : \`${formatRobotFormula(robotModel.formula)}\`.`);
+      lines.push(
+        `Qualite d'ajustement : R2=${robotModel.formula.rSquared.toFixed(3)}, erreur moyenne ${robotModel.formula.rmseRobots.toFixed(1)} robot(s).`,
+      );
+      lines.push("");
+    } else {
+      lines.push(
+        "_Plusieurs niveaux de robots ont ete testes, mais pas assez de dispositions distinctes pour ajuster une formule globale._",
+      );
+      lines.push("");
+    }
+    lines.push("| Disposition | R* observe | Debit max | Perte apres seuil | R* formule |");
+    lines.push("| --- | ---: | ---: | ---: | ---: |");
+    for (const context of robotModel.contexts) {
+      const predicted = robotModel.formula
+        ? predictRobotsFromFormula(robotModel.formula, context.featureValues)
+        : null;
+      lines.push(
+        `| ${context.label} | ${context.recommended.robotCount} | ${context.bestObserved.throughput.toFixed(2)} | ${context.saturationLossPct.toFixed(0)}% | ${predicted ? predicted.toFixed(1) : "-"} |`,
+      );
     }
   }
   lines.push("");

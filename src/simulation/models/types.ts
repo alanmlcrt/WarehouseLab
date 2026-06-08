@@ -291,6 +291,8 @@ export interface WarehouseConfig {
   width: number;
   height: number;
   levelCount: number;
+  /** Backward-compatible field only. Elevator aisles are derived from the
+   *  locked rack layout: two storage columns, then one elevator aisle. */
   verticalAccessLineCount: number;
   subMatrixRows: number;
   subMatrixColumns: number;
@@ -303,6 +305,9 @@ export interface WarehouseConfig {
   rackCount: number;
   pickingStationCount: number;
   pickingStationOrientation: "length" | "width";
+  /** Optional top-down drop cells chosen by the user. These positions are used
+   *  first; missing stations fall back to automatic placement. */
+  customPickingStations?: GridPosition[];
   /** Number of drop cells per picking station (lanes). Default = 2 so robots
    *  don't all queue on the same single cell — closer to a real loading bay. */
   pickingStationLaneCount?: number;

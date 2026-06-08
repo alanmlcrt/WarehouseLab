@@ -3,8 +3,11 @@ import type { RunPoint } from "../../experiments/labKit";
 import { CorrelationHeatmap } from "./CorrelationHeatmap";
 import { InsightsPanel } from "./InsightsPanel";
 import { InteractionPanel } from "./InteractionPanel";
+import { LabHeatmapPanel } from "./LabHeatmapPanel";
 import { ParetoChart } from "./ParetoChart";
+import { PhysicalHeatmapPanel } from "./PhysicalHeatmapPanel";
 import { RegressionPanel } from "./RegressionPanel";
+import { RobotFormulaPanel } from "./RobotFormulaPanel";
 import { StatTestsPanel } from "./StatTestsPanel";
 
 interface AdvancedPanelProps {
@@ -30,6 +33,24 @@ const TOOLS: Tool[] = [
     label: "Robustesse",
     hint: "Stabilité des résultats d'un essai (seed) à l'autre, par configuration.",
     render: (points) => <InsightsPanel points={points} />,
+  },
+  {
+    id: "robot-formula",
+    label: "Formule R*",
+    hint: "Nombre de robots optimal selon la demande et la geometrie testee.",
+    render: (points) => <RobotFormulaPanel points={points} />,
+  },
+  {
+    id: "heatmap",
+    label: "Heatmap",
+    hint: "Carte 2D des resultats : deux parametres croises, une metrique moyenne.",
+    render: (points) => <LabHeatmapPanel points={points} />,
+  },
+  {
+    id: "physical-heatmap",
+    label: "Plan chaud",
+    hint: "Recap physique d'un run : plan d'entrepot colore par trafic ou attente.",
+    render: (points) => <PhysicalHeatmapPanel points={points} />,
   },
   {
     id: "regression",

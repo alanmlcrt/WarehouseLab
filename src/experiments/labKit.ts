@@ -2,9 +2,11 @@
 import { getEffectiveCrateOrdersPerMinute } from "../simulation/core/demand";
 import { deriveBatteryWeightKg } from "../simulation/core/derivedConfig";
 import type {
+  Cell,
   MetricSample,
   SimulationConfig,
   SimulationMetrics,
+  SimulationState,
 } from "../simulation/models/types";
 import { cloneConfig } from "../simulation/scenarios/presets";
 
@@ -76,6 +78,7 @@ export const WAREHOUSE_SIZE_PRESETS: Record<string, WarehouseSizePreset> = {
   m:  { label: "M   (24x18)", width: 24, height: 18 },
   l:  { label: "L   (32x24)", width: 32, height: 24 },
   xl: { label: "XL  (42x30)", width: 42, height: 30 },
+  custom: { label: "Custom", width: 0, height: 0 },
 };
 
 // ---------------------------------------------------------------------------
@@ -583,6 +586,29 @@ export interface RunPoint {
   factors: Record<string, FactorValue>;
   metrics: Record<string, number>;
   feasible: boolean;
+  physicalSnapshot?: LabPhysicalSnapshot;
+}
+
+export type LabPhysicalCellKind = Cell["type"];
+
+export interface LabPhysicalCell {
+  x: number;
+  y: number;
+  type: LabPhysicalCellKind;
+  traffic: number;
+  wait: number;
+}
+
+export interface LabPhysicalSnapshot {
+  width: number;
+  height: number;
+  rackCount: number;
+  stationCount: number;
+  chargerCount: number;
+  elevatorAisleCount: number;
+  maxTraffic: number;
+  maxWait: number;
+  cells: LabPhysicalCell[];
 }
 
 export interface LabProgress {
@@ -802,6 +828,7 @@ export async function runLab({
           feasibilityMargin,
         },
         feasible: steady.steadyThroughputPerMinute >= demand * 0.98,
+        physicalSnapshot: capturePhysicalSnapshot(snapshot),
       };
       points.push(point);
       completed += 1;
@@ -885,7 +912,7 @@ function applyCombination(
     // rackCount is set to RACK_FILL_SENTINEL so the factory fills available space.
     if (factor.compound && entry.factorId === "warehouseSize") {
       const preset = WAREHOUSE_SIZE_PRESETS[entry.value as string];
-      if (preset) {
+      if (preset && preset.width > 0 && preset.height > 0) {
         config.warehouse.width = preset.width;
         config.warehouse.height = preset.height;
         config.warehouse.rackCount = RACK_FILL_SENTINEL;
@@ -1100,6 +1127,39 @@ function buildLabel(combination: CombinationEntry[], seedIndex: number): string 
     .map((entry) => `${entry.factorId}=${entry.value}`)
     .concat(`s${seedIndex + 1}`)
     .join("|");
+}
+
+function capturePhysicalSnapshot(state: SimulationState): LabPhysicalSnapshot {
+  let maxTraffic = 0;
+  let maxWait = 0;
+  const cells: LabPhysicalCell[] = [];
+
+  for (const cell of state.warehouse.cells) {
+    maxTraffic = Math.max(maxTraffic, cell.trafficCount);
+    maxWait = Math.max(maxWait, cell.waitCount);
+    if (cell.type === "empty" && cell.trafficCount === 0 && cell.waitCount === 0) {
+      continue;
+    }
+    cells.push({
+      x: cell.x,
+      y: cell.y,
+      type: cell.type,
+      traffic: cell.trafficCount,
+      wait: cell.waitCount,
+    });
+  }
+
+  return {
+    width: state.warehouse.width,
+    height: state.warehouse.height,
+    rackCount: state.warehouse.racks.length,
+    stationCount: state.warehouse.pickingStations.length,
+    chargerCount: state.warehouse.chargingStations.length,
+    elevatorAisleCount: state.warehouse.elevatorZones.length,
+    maxTraffic,
+    maxWait,
+    cells,
+  };
 }
 
 function yieldToBrowser(): Promise<void> {

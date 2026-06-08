@@ -29,6 +29,8 @@ Les robots du MVP transportent une commande a la fois. Ils passent par les etats
 
 L'etat `depleted` correspond a une panne seche: un robot dont la batterie atteint 0 en pleine tache s'immobilise, rend sa commande a la file, et reste hors-service le temps d'un secours/recharge (proportionnel a `rechargeTicks`) avant de repartir batterie pleine.
 
+Au demarrage d'une simulation, les robots sont places aleatoirement sur des cellules traversables (`empty` ou `rail`) de l'entrepot, via `robotSpawnSeed`. Ils ne sont donc plus regroupes autour des stations par defaut.
+
 ## Commandes Et Caisses
 
 L'unite operationnelle simulee est la caisse: un robot transporte une seule caisse a la fois.
@@ -59,6 +61,8 @@ Le mode `Types` colore les niveaux de rack par famille SKU. Le mode `Demande` co
 
 Les stations de picking servent de destinations de livraison. Le MVP choisit la station la plus proche de la position de pick.
 
+La config peut porter `warehouse.customPickingStations`: une liste de cellules de depot placees manuellement sur un plan 2D vu du dessus. Ces cellules sont reservees avant la generation des racks et chargeurs; les stations manquantes, si la liste est plus courte que `pickingStationCount`, retombent sur le placement automatique.
+
 ## Rails Et Intersections
 
 Le modele genere maintenant un reseau de rails horizontal/vertical avec intersections et switches. Dans le MVP, ces rails sont surtout visuels et servent de preparation au mode rails guides complet. Ils ne bloquent pas les robots autonomes et ne remplacent pas encore le pathfinding grille.
@@ -79,9 +83,9 @@ Le Research Lab regroupe maintenant les points du Capacity Study par topologie d
 
 ## Ascenseurs
 
-Les `ElevatorZone` relient tous les niveaux. Le layout genere une ou plusieurs lignes verticales dediees, placees sur les couloirs proches du centre. Les robots ne peuvent changer d'etage que depuis ces lignes.
+Les `ElevatorZone` relient tous les niveaux. Le layout genere une ou plusieurs lignes verticales dediees en suivant une trame verrouillee: 2 rangees de stockage, puis 1 couloir ascenseur. Les robots ne peuvent changer d'etage que depuis ces lignes.
 
-L'utilisateur controle le nombre d'etages et le nombre de lignes verticales dediees.
+L'utilisateur controle le nombre d'etages et le nombre de passages transverses. Le nombre de couloirs ascenseur est derive de la largeur de l'entrepot et de la trame 2/1; il n'est pas un parametre utilisateur separe.
 
 Le routage vertical MVP fonctionne ainsi:
 

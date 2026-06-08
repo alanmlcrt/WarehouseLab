@@ -4,3 +4,4 @@ dist/
 dev-server.*.log
 output/playwright/
 *.tsbuildinfo
+LINKEDIN_EXPERIENCES.md

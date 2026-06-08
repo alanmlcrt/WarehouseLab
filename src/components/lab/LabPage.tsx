@@ -3,9 +3,10 @@ import { useSimulationStore } from "../../store/simulationStore";
 import { AdvancedPanel } from "./AdvancedPanel";
 import { CampaignManager } from "./CampaignManager";
 import { ExplorerView } from "./ExplorerView";
+import { Plan2DPage } from "./Plan2DPage";
 import { PlanEditor } from "./PlanEditor";
 
-type LabTab = "config" | "explorer" | "tools" | "campaigns";
+type LabTab = "plan2d" | "config" | "explorer" | "tools" | "campaigns";
 
 const TABS: Array<{
   id: LabTab;
@@ -14,6 +15,7 @@ const TABS: Array<{
   /** Requires a result dataset to be useful. */
   needsResults?: true;
 }> = [
+  { id: "plan2d", label: "Plan 2D", description: "Dessiner l'entrepot de base et appliquer sa configuration" },
   { id: "config", label: "Configurer", description: "Choisir ce qui est fixé et ce qu'on fait varier" },
   { id: "explorer", label: "Explorer", description: "Tracer librement un paramètre contre une métrique", needsResults: true },
   { id: "tools", label: "Outils", description: "Interactions, corrélations, régression, tests…", needsResults: true },
@@ -31,12 +33,12 @@ export function LabPage() {
   const clearResults = useSimulationStore((state) => state.clearLabResults);
   const exitLab = useSimulationStore((state) => state.exitLab);
 
-  const [tab, setTab] = useState<LabTab>("config");
+  const [tab, setTab] = useState<LabTab>("plan2d");
   const hasResults = results.length > 0;
 
   // Land on the explorer the first time a dataset appears.
   useEffect(() => {
-    if (hasResults && tab === "config" && !isRunning) {
+    if (hasResults && (tab === "config" || tab === "plan2d") && !isRunning) {
       setTab("explorer");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -86,6 +88,9 @@ export function LabPage() {
         </button>
       </header>
       <main className="min-h-0 p-3">
+        {tab === "plan2d" ? (
+          <Plan2DPage plan={plan} onPlanChange={updatePlan} />
+        ) : null}
         {tab === "config" ? (
           <PlanEditor
             error={error}

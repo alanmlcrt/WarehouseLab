@@ -69,10 +69,10 @@ function meanCenteredYDomain(
   if (!Number.isFinite(lo) || !Number.isFinite(hi)) return ["auto", "auto"];
   if (hi === lo) {
     const bump = Math.max(Math.abs(hi) * 0.05, 1);
-    return [lo - bump, hi + bump];
+    return [Math.min(0, lo - bump), hi + bump];
   }
   const pad = (hi - lo) * 0.12;
-  return [lo - pad, hi + pad];
+  return [Math.min(0, lo - pad), hi + pad];
 }
 
 function emptyState(message: string) {
@@ -410,6 +410,7 @@ export function BarsChart(props: ChartProps) {
     .filter((r): r is Record<string, number | string> => r !== null);
 
   const fz = axisFont(compact);
+  const yDomain = meanCenteredYDomain(series);
 
   return (
     <ResponsiveContainer height="100%" width="100%">
@@ -437,6 +438,7 @@ export function BarsChart(props: ChartProps) {
           tick={{ fontSize: fz, fill: "#475569" }}
         />
         <YAxis
+          domain={yDomain}
           label={
             compact
               ? undefined

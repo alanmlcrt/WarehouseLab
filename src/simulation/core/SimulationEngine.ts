@@ -143,14 +143,11 @@ export class SimulationEngine {
     warehouse: Warehouse,
   ): Robot[] {
     const spawnPositions = this.getSpawnPositions(warehouse);
-    const spawnOffset =
-      spawnPositions.length > 0
-        ? this.robotSpawnRng.int(0, spawnPositions.length - 1)
-        : 0;
+    const shuffledSpawnPositions = this.robotSpawnRng.shuffle(spawnPositions);
 
     return Array.from({ length: config.robots.robotCount }, (_, index) => {
       const position =
-        spawnPositions[(index + spawnOffset) % spawnPositions.length] ?? { x: 2, y: 1 };
+        shuffledSpawnPositions[index % shuffledSpawnPositions.length] ?? { x: 2, y: 1 };
       const initialBatteryRatio = this.batteryRng.float(0.9, 1);
       return {
         id: `ROBOT_${index + 1}`,
@@ -179,42 +176,17 @@ export class SimulationEngine {
   }
 
   private getSpawnPositions(warehouse: Warehouse): GridPosition[] {
+    const preferred = warehouse.cells
+      .filter((cell) => cell.type === "empty" || cell.type === "rail")
+      .map((cell) => ({ x: cell.x, y: cell.y }));
+    if (preferred.length > 0) {
+      return preferred;
+    }
+
     const blocked = buildBlockedCellSet(warehouse);
-    const positions: GridPosition[] = [];
-    const seen = new Set<string>();
-
-    const add = (position: GridPosition) => {
-      const key = positionKey(position);
-      if (!blocked.has(key) && !seen.has(key)) {
-        seen.add(key);
-        positions.push(position);
-      }
-    };
-
-    for (const station of warehouse.pickingStations) {
-      add(station.accessPosition);
-    }
-
-    for (let depth = 1; depth < Math.max(warehouse.width, warehouse.height); depth += 1) {
-      for (const station of warehouse.pickingStations) {
-        const candidates = getPositionsAtDistance(
-          station.accessPosition,
-          depth,
-          warehouse.width,
-          warehouse.height,
-        );
-
-        for (const candidate of candidates) {
-          add(candidate);
-        }
-      }
-
-      if (positions.length >= warehouse.pickingStations.length * (depth + 1)) {
-        break;
-      }
-    }
-
-    return positions;
+    return warehouse.cells
+      .filter((cell) => !blocked.has(positionKey(cell)))
+      .map((cell) => ({ x: cell.x, y: cell.y }));
   }
 
   private generateDemand(): void {
@@ -1317,6 +1289,7 @@ export class SimulationEngine {
    *  edge in the same tick. */
   private buildReservationTable(): void {
     this.reservationTable.clear();
+    const policy = this.state.config.movement.reroutingPolicy ?? "periodic";
 
     const movers = this.state.robots
       .filter(
@@ -1334,7 +1307,7 @@ export class SimulationEngine {
       );
 
     for (const robot of movers) {
-      if (robot.path.length === 0 && robot.destination) {
+      if ((robot.path.length === 0 || policy === "reactive") && robot.destination) {
         robot.path = this.planPath(robot.position, robot.destination, robot);
       }
 

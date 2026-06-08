@@ -157,6 +157,7 @@ export function PlanEditor({
     for (const size of sizes) {
       const preset = WAREHOUSE_SIZE_PRESETS[String(size)];
       if (!preset) continue;
+      if (preset.width <= 0 || preset.height <= 0) continue;
       const cap = maxRobotsForArea(preset.width, preset.height);
       if (!worst || cap < worst.cap) worst = { size: preset.label.trim(), cap };
     }
@@ -423,7 +424,6 @@ export function PlanEditor({
           </div>
         ) : null}
       </div>
-
       {/* Drag board ----------------------------------------------------- */}
       <DndContext
         sensors={sensors}

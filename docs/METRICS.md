@@ -117,6 +117,30 @@ Utilite: passer d'une formule heuristique a des coefficients estimes depuis les 
 
 Affichage: `R2`, erreur de validation croisee, nombre de points et coefficients dans l'export CSV/JSON du Research Lab.
 
+## Formule Robots R*
+
+Definition: estimation du nombre de robots qui maximise le debit pour une disposition donnee.
+
+Calcul local:
+
+- les points du DOE sont regroupes par disposition, hors `robotCount`;
+- chaque niveau de robots est moyenne sur ses seeds;
+- `R* observe` est le plus petit nombre de robots qui atteint au moins 98% du meilleur debit steady-state observe;
+- `perte apres seuil` mesure la baisse maximale de debit quand on ajoute des robots au-dela du meilleur point.
+
+Formule globale:
+
+```text
+ln(R*) = b0 + b1 ln(demande) + b2 ln(surface) + b3 ln(niveaux)
+       + b4 ln(stations) + b5 ln(chargeurs) + b6 ln(passages+1)
+```
+
+Les termes constants dans la campagne sont ignores automatiquement. La formule est donc adaptee au plan d'experience disponible.
+
+Utilite: rendre visible le seuil ou une flotte passe de "capacite utile" a "congestion", puis convertir plusieurs courbes locales en regle de dimensionnement exploratoire.
+
+Affichage: outil `Formule R*` dans les outils avances, tableau des dispositions et section `Formule robots R*` dans le rapport Markdown.
+
 ## Qualite De Slotting
 
 Definitions:
@@ -137,7 +161,7 @@ Definitions:
 - `elevatorTrips`: nombre de trajets verticaux termines.
 - `elevatorRideTicks`: ticks cumules passes en trajet vertical.
 - `elevatorWaitTicks`: ticks cumules d'attente lies aux acces verticaux.
-- `verticalPressure`: `(elevatorWaitTicks + elevatorRideTicks) / (ticksSimules * nombreDeLignesVerticales)`.
+- `verticalPressure`: `(elevatorWaitTicks + elevatorRideTicks) / (ticksSimules * nombreDeCouloirsAscenseur)`, ou les couloirs ascenseur sont derives de la largeur avec la trame verrouillee 2 rangees de stockage / 1 couloir ascenseur.
 
 Utilite: detecter si le nombre ou la disposition des lignes verticales limite le debit avant meme que le nombre de robots soit le vrai probleme.
 
@@ -186,6 +210,22 @@ Definitions (V0.3, `labStats.ts`) :
 Utilite: passer de « un facteur a un effet » a « quels niveaux different » et « les facteurs interagissent-ils ».
 
 Affichage: tables Dunn + Cliff's delta dans `Tests stats`, interaction plot dans `Interactions`.
+
+## Heatmap De Resultats Lab
+
+Definition: carte 2D des resultats d'un DOE. Deux facteurs varies forment les axes, et chaque cellule affiche la moyenne d'une metrique sur les runs/seeds qui partagent ces deux niveaux.
+
+Utilite: reperer visuellement les zones de performance ou de saturation, par exemple `robotCount x levelCount -> debit`, `warehouseSize x robotCount -> backlog`, ou `storageStrategy x pathfindingStrategy -> congestion`.
+
+Affichage: outil `Heatmap` dans l'onglet `Outils` du Lab. La couleur indique une valeur plus elevee de la metrique selectionnee; les cellules vides indiquent une combinaison absente du plan.
+
+## Heatmap Physique Lab
+
+Definition: recap visuel d'un run Lab sur le plan reel de l'entrepot. Chaque run conserve une capture compacte des cellules utiles: type de cellule, trafic cumule et attente cumulee.
+
+Utilite: relier une performance numerique a une cause spatiale visible: couloir ascenseur sature, station trop isolee, passage transverse tres utilise ou zone de racks peu traversee.
+
+Affichage: outil `Plan chaud` dans l'onglet `Outils` du Lab. L'utilisateur choisit un run et bascule entre les couches `Trafic` et `Attente`.
 
 ## Optimisation Multi-Objectifs
 

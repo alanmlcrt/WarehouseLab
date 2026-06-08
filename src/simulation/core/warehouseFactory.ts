@@ -24,6 +24,9 @@ import type {
   WarehouseLevel,
 } from "../models/types";
 
+export const RACK_COLUMNS_PER_ELEVATOR_AISLE = 2;
+const WAREHOUSE_LAYOUT_EDGE_BUFFER = 3;
+
 export function buildWarehouse(
   config: SimulationConfig,
   layoutRng: SeededRandom,
@@ -31,21 +34,6 @@ export function buildWarehouse(
   skuCatalogRng: SeededRandom,
 ): Warehouse {
   const cells = createEmptyCells(config.warehouse.width, config.warehouse.height);
-  const pickingStations = createPickingStations(
-    config.warehouse.width,
-    config.warehouse.height,
-    config.warehouse.pickingStationCount,
-    config.warehouse.pickingStationOrientation,
-    stationRng,
-    config.warehouse.pickingStationLaneCount,
-  );
-  const chargingStations = createChargingStations(
-    config.warehouse.width,
-    config.warehouse.height,
-    config.warehouse.chargingStationCount,
-    config.warehouse.pickingStationOrientation,
-    stationRng,
-  );
   const levels = createWarehouseLevels(config.warehouse.levelCount);
   const subMatrices = createSubMatrices(config);
   const interMatrixConnectors = createInterMatrixConnectors(subMatrices);
@@ -53,6 +41,24 @@ export function buildWarehouse(
     config.warehouse.width,
     config.warehouse.height,
     levels,
+  );
+  const pickingStations = createPickingStations(
+    config.warehouse.width,
+    config.warehouse.height,
+    config.warehouse.pickingStationCount,
+    config.warehouse.pickingStationOrientation,
+    stationRng,
+    config.warehouse.pickingStationLaneCount,
+    config.warehouse.customPickingStations,
+    new Set(elevatorZones.flatMap((elevator) => elevator.cells.map(positionKey))),
+  );
+  const chargingStations = createChargingStations(
+    config.warehouse.width,
+    config.warehouse.height,
+    config.warehouse.chargingStationCount,
+    config.warehouse.pickingStationOrientation,
+    stationRng,
+    new Set(pickingStations.flatMap((station) => station.accessPositions.map(positionKey))),
   );
 
   for (const station of pickingStations) {
@@ -77,14 +83,19 @@ export function buildWarehouse(
     for (const position of elevator.cells) {
       setCell(cells, position, {
         type: "elevator",
-      elevatorId: elevator.id,
+        elevatorId: elevator.id,
       });
     }
   }
 
   for (const connector of interMatrixConnectors) {
     for (const position of connector.cells) {
-      setCell(cells, position, { type: "rail" });
+      const cell = cells.find(
+        (candidate) => candidate.x === position.x && candidate.y === position.y,
+      );
+      if (cell?.type === "empty") {
+        setCell(cells, position, { type: "rail" });
+      }
     }
   }
 
@@ -153,10 +164,35 @@ function createPickingStations(
   orientation: SimulationConfig["warehouse"]["pickingStationOrientation"],
   rng: SeededRandom,
   laneCount: number = 2,
+  customPositions: GridPosition[] = [],
+  blockedPositions: Set<string> = new Set(),
 ): PickingStation[] {
   const aisleColumns = computeAisleLayout(width).aisleColumns;
   const stationOrderOffset = count > 0 ? rng.int(0, Math.max(0, count - 1)) : 0;
-  return Array.from({ length: count }, (_, index) => {
+  const stations: PickingStation[] = [];
+  const used = new Set<string>();
+  const usableCustomPositions = customPositions
+    .map((position) => ({
+      x: Math.round(position.x),
+      y: Math.round(position.y),
+    }))
+    .filter((position) => inBounds(position, width, height))
+    .filter((position) => !blockedPositions.has(positionKey(position)))
+    .filter((position) => {
+      const key = positionKey(position);
+      if (used.has(key)) {
+        return false;
+      }
+      used.add(key);
+      return true;
+    })
+    .slice(0, count);
+
+  usableCustomPositions.forEach((accessPosition, index) => {
+    stations.push(createStation(index, accessPosition, accessPosition, [accessPosition]));
+  });
+
+  for (let index = stations.length; index < count; index += 1) {
     const stationIndex = (index + stationOrderOffset) % Math.max(1, count);
     const aisleIndex = Math.min(
       aisleColumns.length - 1,
@@ -167,7 +203,7 @@ function createPickingStations(
         ) + rng.int(-1, 1),
       ),
     );
-    const accessPosition =
+    const autoAccessPosition =
       orientation === "width"
         ? {
             x: aisleColumns[aisleIndex] ?? Math.floor(width / 2),
@@ -184,6 +220,13 @@ function createPickingStations(
               ),
             ),
           };
+    const accessPosition = findNearestAvailableStationCell(
+      autoAccessPosition,
+      width,
+      height,
+      used,
+      blockedPositions,
+    );
     const position =
       orientation === "width"
         ? { x: accessPosition.x, y: height }
@@ -210,6 +253,8 @@ function createPickingStations(
         candidate.x <= xMax &&
         candidate.y >= yMin &&
         candidate.y <= yMax &&
+        !blockedPositions.has(positionKey(candidate)) &&
+        !used.has(positionKey(candidate)) &&
         !accessPositions.some(
           (existing) => existing.x === candidate.x && existing.y === candidate.y,
         )
@@ -220,19 +265,60 @@ function createPickingStations(
     if (accessPositions.length === 0) {
       accessPositions.push(accessPosition);
     }
+    accessPositions.forEach((stationPosition) => used.add(positionKey(stationPosition)));
 
-    return {
-      id: `STATION_${index + 1}`,
-      name: `Station ${index + 1}`,
-      position,
-      accessPosition: accessPositions[0],
-      accessPositions,
-      queueLength: 0,
-      processedOrders: 0,
-      active: false,
-      busyTicks: 0,
-    };
-  });
+    stations.push(createStation(index, position, accessPositions[0], accessPositions));
+  }
+
+  return stations;
+}
+
+function createStation(
+  index: number,
+  position: GridPosition,
+  accessPosition: GridPosition,
+  accessPositions: GridPosition[],
+): PickingStation {
+  return {
+    id: `STATION_${index + 1}`,
+    name: `Station ${index + 1}`,
+    position,
+    accessPosition,
+    accessPositions,
+    queueLength: 0,
+    processedOrders: 0,
+    active: false,
+    busyTicks: 0,
+  };
+}
+
+function findNearestAvailableStationCell(
+  preferred: GridPosition,
+  width: number,
+  height: number,
+  used: Set<string>,
+  blocked: Set<string>,
+): GridPosition {
+  const isOpen = (position: GridPosition) =>
+    inBounds(position, width, height) &&
+    !used.has(positionKey(position)) &&
+    !blocked.has(positionKey(position));
+  if (isOpen(preferred)) {
+    return preferred;
+  }
+
+  for (let distance = 1; distance < Math.max(width, height); distance += 1) {
+    for (const candidate of getPositionsAtDistance(preferred, distance, width, height)) {
+      if (isOpen(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  return {
+    x: Math.min(width - 1, Math.max(0, preferred.x)),
+    y: Math.min(height - 1, Math.max(0, preferred.y)),
+  };
 }
 
 function createChargingStations(
@@ -241,13 +327,15 @@ function createChargingStations(
   count: number,
   pickingStationOrientation: SimulationConfig["warehouse"]["pickingStationOrientation"],
   rng: SeededRandom,
+  excludedPositions: Set<string> = new Set(),
 ): ChargingStation[] {
   const candidates = range(2, Math.max(2, width - 2))
     .filter((x) => x % 2 === 0)
     .map((x) => ({
       x,
       y: pickingStationOrientation === "width" ? 1 : height - 2,
-    }));
+    }))
+    .filter((position) => !excludedPositions.has(positionKey(position)));
   const positions = rng.shuffle(candidates).slice(0, count);
 
   return Array.from({ length: count }, (_, index) => ({
@@ -383,12 +471,16 @@ function computeAisleLayout(width: number): {
 } {
   const aisleColumns: number[] = [];
   const rackColumns: number[] = [];
-  const minX = 3;
-  const maxX = width - 3;
+  const minX = WAREHOUSE_LAYOUT_EDGE_BUFFER;
+  const maxX = width - WAREHOUSE_LAYOUT_EDGE_BUFFER;
   let cursor = minX;
 
   while (cursor <= maxX) {
-    for (let offset = 0; offset < 2 && cursor <= maxX; offset += 1) {
+    for (
+      let offset = 0;
+      offset < RACK_COLUMNS_PER_ELEVATOR_AISLE && cursor <= maxX;
+      offset += 1
+    ) {
       rackColumns.push(cursor);
       cursor += 1;
     }
@@ -404,6 +496,10 @@ function computeAisleLayout(width: number): {
   }
 
   return { aisleColumns, rackColumns };
+}
+
+export function getElevatorAisleCountForWidth(width: number): number {
+  return computeAisleLayout(width).aisleColumns.length;
 }
 
 /** Rows that act as horizontal cross-aisles (kept rack-free). A count <= 0
@@ -760,6 +856,31 @@ function isRailCandidate(
 
 function range(start: number, end: number): number[] {
   return Array.from({ length: Math.max(0, end - start + 1) }, (_, index) => start + index);
+}
+
+function getPositionsAtDistance(
+  center: GridPosition,
+  distance: number,
+  width: number,
+  height: number,
+): GridPosition[] {
+  const positions: GridPosition[] = [];
+  for (let dx = -distance; dx <= distance; dx += 1) {
+    const dy = distance - Math.abs(dx);
+    const candidates =
+      dy === 0
+        ? [{ x: center.x + dx, y: center.y }]
+        : [
+            { x: center.x + dx, y: center.y + dy },
+            { x: center.x + dx, y: center.y - dy },
+          ];
+    for (const candidate of candidates) {
+      if (inBounds(candidate, width, height)) {
+        positions.push(candidate);
+      }
+    }
+  }
+  return positions;
 }
 
 function uniqueNumbers(values: number[]): number[] {

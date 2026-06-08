@@ -23,15 +23,35 @@ Parametres: 5, 10, 15, 20 robots.
 
 Metriques: debit, utilisation, attentes, backlog.
 
+## Formule R* Par Disposition
+
+Question: peut-on predire le nombre de robots qui maximise la performance a partir de la demande et de la geometrie de l'entrepot ?
+
+Methode:
+
+- faire varier `robotCount` sur plusieurs niveaux pour chaque disposition;
+- repeter chaque point sur plusieurs seeds;
+- regrouper les resultats par disposition, puis choisir le plus petit nombre de robots qui atteint au moins 98% du meilleur debit observe;
+- mesurer la perte de debit apres le seuil pour detecter les configurations ou "plus de robots" degrade la performance;
+- si plusieurs dispositions sont testees, ajuster une loi log-lineaire:
+
+```text
+R* ~= k x demande^a x surface^b x niveaux^c x stations^d x chargeurs^e x passages^f
+```
+
+Utilite: transformer le Research Lab en outil de dimensionnement exploratoire. La courbe locale explique le phenomene, la formule globale donne une regle simple a tester sur de nouvelles matrices.
+
+Affichage: outil `Formule R*` dans les outils avances et section dediee dans l'export Markdown.
+
 ## Capacity Study
 
-Question: combien de robots faut-il pour une matrice donnee, avec une demande, un nombre d'etages, une topologie de lignes verticales et un profil batterie donnes ?
+Question: combien de robots faut-il pour une matrice donnee, avec une demande, un nombre d'etages, une largeur d'entrepot et un profil batterie donnes ?
 
 Parametres balayes automatiquement:
 
 - nombre de robots autour d'une premiere estimation basee sur la demande;
 - batterie compacte, batterie courante, batterie longue autonomie;
-- nombre de lignes verticales actuel et actuel + 1.
+- largeur actuelle et largeur elargie, ce qui peut ajouter un couloir ascenseur via la trame 2/1.
 - topologie en sous-matrices: configuration actuelle, un decoupage supplementaire horizontal ou vertical.
 - poids physique induit par la batterie: le poids batterie modifie l'energie par cellule.
 
@@ -66,13 +86,13 @@ La regression inclut aussi `slottingInefficiency`, derive de l'efficacite de pla
 
 ## Vertical Topology Study
 
-Question: combien de lignes verticales faut-il pour eviter que les changements d'etage deviennent le goulet d'etranglement ?
+Question: comment la trame verticale verrouillee absorbe-t-elle les changements d'etage quand on modifie la largeur, les niveaux et les passages transverses ?
 
-Source: le Vertical Topology Study est derive des points du Capacity Study. Il regroupe les points par `verticalAccessLineCount`.
+Source: le Vertical Topology Study est derive des points du Capacity Study. Il regroupe les points par nombre de couloirs ascenseur generes par la largeur, avec une regle fixe: 2 rangees de stockage puis 1 couloir ascenseur.
 
 Metriques:
 
-- nombre de points testes par nombre de lignes;
+- nombre de points testes par nombre de couloirs ascenseur;
 - nombre de points faisables;
 - meilleur nombre de robots stable;
 - debit moyen;

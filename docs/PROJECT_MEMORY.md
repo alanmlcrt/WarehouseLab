@@ -43,10 +43,13 @@ MVP fonctionnel cree et valide par build. Le serveur Vite local a ete demarre su
 - Rendu 3D ameliore avec rails visibles, intersections/switches, chargeurs plus lisibles, ombres de contact et robots interpoles.
 - Matrice 3D multi-etages avec racks empiles, plateaux de niveaux et allees d'ascenseurs visibles.
 - Allees d'ascenseurs completes, alignees dans le sens des couloirs.
-- Nombre d'allees d'ascenseurs derive automatiquement du nombre de couloirs du layout, sans parametre utilisateur separe.
+- Trame verticale verrouillee: 2 rangees de stockage puis 1 couloir ascenseur. Le nombre d'allees d'ascenseurs est derive automatiquement de la largeur, sans parametre utilisateur separe.
 - Routage vertical MVP: les robots vont vers une allee ascenseur, montent ou descendent, puis continuent horizontalement au bon niveau.
 - Animation verticale via `visualLevel` pour montrer la montee et la descente.
 - Selection de robots, racks, stations, chargeurs et cellules.
+- Placement manuel des stations sur un plan 2D dans les parametres; les cellules choisies deviennent les points de depot.
+- Onglet Lab `Plan 2D`: configuration visuelle de l'entrepot de base (dimensions, etages, passages transverses, densite, stations, chargeurs) avec rappel de la trame 2/1 et bouton `Appliquer cet entrepot`. Le DOE passe alors `warehouseSize=custom` pour conserver le plan dessine.
+- Spawn initial des robots aleatoire et reproductible dans les cellules traversables de l'entrepot via `robotSpawnSeed`.
 - Selection des ascenseurs avec detail de position, niveaux desservis, file et trajets.
 - Dashboard Recharts plus lisible avec cartes compactes, graphe agrandi et contraste renforce.
 - Panneau de parametres pour entrepot, robots, demande, stockage et seeds.
@@ -56,6 +59,7 @@ MVP fonctionnel cree et valide par build. Le serveur Vite local a ete demarre su
 - README et favicon.
 - Pathfinding A* / Dijkstra ponderes (trafic + attente) en plus de Manhattan.
 - Reservation temporelle simplifiee: couche espace-temps cooperative par priorite avec anti-swap (arete), activee par `temporalReservation` ou la strategie `reservation`.
+- Sous `reservation + reactive`, les robots recalculent maintenant leur chemin avant la passe de reservation pour eviter les attentes excessives sur des chemins devenus obsoletes.
 - Strategies de stockage completes: randomStorage, abcStorage, balancedABCStorage, familyStorage, dynamicSlotting.
 - Heatmap de congestion (modes Trafic / Attentes) avec legende dans la scene 3D.
 - Export CSV des series temporelles.
@@ -66,6 +70,8 @@ MVP fonctionnel cree et valide par build. Le serveur Vite local a ete demarre su
 - V0.3 boite a outils recherche:
   - Effets de facteurs (main-effects plot moyenne ± IC 95% bootstrap) + post-hoc de Dunn (Holm) dans `Tests stats`.
   - Analyse d'interactions a deux facteurs (`Interactions`).
+  - Formule robots R*: courbe debit vs nombre de robots par disposition, seuil de saturation et loi empirique `R* = f(demande, surface, niveaux, stations, chargeurs, passages)`.
+  - Plan chaud: recap physique d'un run Lab avec heatmap de trafic/attente sur le plan reel de l'entrepot.
   - Optimisation multi-objectifs ponderee + genou de Pareto (`Optimisation`).
   - Campagnes nommees persistantes + export JSON/CSV/Markdown + import (`Campagnes`).
 
