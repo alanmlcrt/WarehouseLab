@@ -76,11 +76,11 @@ export function ExplorerView({ points }: ExplorerViewProps) {
     () => (xFactor ? buildSeries(points, xFactor, activeY, colorFactor) : null),
     [points, xFactor, activeY, colorFactor],
   );
-  // Secondary series: no color split (single group) so the dashed overlay stays
-  // readable — even when the primary chart is colored by a factor.
+  // Secondary series: split by the same colorFactor as the primary so the
+  // dashed Y2 line can be drawn per group, matching the Y1 color.
   const series2 = useMemo(
-    () => (xFactor && activeY2 ? buildSeries(points, xFactor, activeY2, null) : null),
-    [points, xFactor, activeY2],
+    () => (xFactor && activeY2 ? buildSeries(points, xFactor, activeY2, colorFactor) : null),
+    [points, xFactor, activeY2, colorFactor],
   );
 
   if (points.length === 0) {
@@ -211,13 +211,13 @@ export function ExplorerView({ points }: ExplorerViewProps) {
       <section className="min-h-0 rounded-lg border border-line bg-white p-3 shadow-sm">
         {colorFactor ? <Legend series={series} colorOf={colorOf} colorFactor={colorFactor} /> : null}
         {series2 && y2Metric ? (
-          <div className="mb-1 flex items-center gap-1.5 text-xs text-amber-700">
+          <div className="mb-1 flex items-center gap-1.5 text-xs text-slate-500">
             <span
               aria-hidden
               className="inline-block h-0.5 w-6"
               style={{
                 background:
-                  "repeating-linear-gradient(to right, #d97706 0 5px, transparent 5px 9px)",
+                  "repeating-linear-gradient(to right, #64748b 0 5px, transparent 5px 9px)",
               }}
             />
             <span className="font-medium">Axe droit (pointillés) :</span>

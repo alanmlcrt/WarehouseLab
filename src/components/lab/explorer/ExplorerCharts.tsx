@@ -34,9 +34,9 @@ export interface ChartProps {
   y2AxisLabel?: string;
 }
 
-/** Distinct hue for the secondary Y axis — uses amber to contrast with the
- *  teal/blue palette of the primary series. */
-const Y2_COLOR = "#d97706";
+/** Neutral hue for the secondary Y axis itself. Dashed Y2 lines reuse the
+ *  per-group palette colors so the eye can pair Y1/Y2 by group. */
+const Y2_COLOR = "#64748b";
 
 function deterministicJitter(key: string, amplitude: number): number {
   if (amplitude <= 0) return 0;
@@ -233,11 +233,12 @@ export function TrendChart(props: ChartProps) {
           );
         })}
         {hasSecondary
-          ? series2!.groups.map((group) => {
-              // Secondary axis: aggregate dashed line — no raw cloud, no per-color split.
-              // We only plot the GRAND mean per X level (across all secondary groups)
-              // because the secondary metric is meant as context, not a full breakdown.
+          ? series.groups.map((group) => {
+              // Secondary axis: one dashed line per primary group, same color as Y1
+              // so the eye can pair Y1/Y2 for each level of "compare by".
               const stats = series2!.statsByGroup.get(group) ?? [];
+              if (stats.length === 0) return null;
+              const color = colorOf(group);
               const meanData = stats.map((s) => ({
                 x: s.xValue,
                 y: s.mean,
@@ -250,11 +251,11 @@ export function TrendChart(props: ChartProps) {
                 <Scatter
                   key={`mean2-${group}`}
                   data={meanData}
-                  fill={Y2_COLOR}
+                  fill={color}
                   fillOpacity={0.95}
                   isAnimationActive={false}
                   line={{
-                    stroke: Y2_COLOR,
+                    stroke: color,
                     strokeWidth: 2,
                     strokeDasharray: "5 4",
                   }}
