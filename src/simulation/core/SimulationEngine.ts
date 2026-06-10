@@ -4,6 +4,7 @@ import { buildWarehouse } from "./warehouseFactory";
 import {
   buildBlockedCellSet,
   buildCellMap,
+  getNeighbors,
   inBounds,
   manhattanDistance,
   positionKey,
@@ -48,6 +49,19 @@ export class SimulationEngine {
    *  `"<offset>:<level>:<posKey>"` or an undirected edge slot
    *  `"e:<offset>:<level>:<edgeKey>"`, mapping to the owning robot id. */
   private reservationTable = new Map<string, string>();
+  /** Robots that successfully booked their next hop this tick (reservation
+   *  mode). A robot may step into a cell still physically occupied by one of
+   *  these — they are guaranteed to vacate it the same tick, which is what
+   *  makes coordinated rotation / following possible and breaks gridlock. */
+  private movingOut = new Set<string>();
+  /** Tick-start occupant of each cell (positionLevelKey -> robot id). Built
+   *  once per tick so the move-admission check sees a stable snapshot even as
+   *  the live `occupied` set is mutated during the pass. */
+  private cellOccupant = new Map<string, string>();
+  /** Consecutive ticks each robot has been unable to advance. Drives the
+   *  evasive side-step that breaks head-on deadlocks in 1-wide aisles, where
+   *  the reservation layer correctly forbids the swap but no one ever yields. */
+  private stuckTicks = new Map<string, number>();
   private orderAccumulator = 0;
   private orderCounter = 1;
   private taskCounter = 1;
@@ -381,8 +395,21 @@ export class SimulationEngine {
     );
     const reserved = new Set<string>();
 
+    // Stable tick-start occupancy snapshot, used by reservation-mode admission
+    // to tell whether the cell a robot wants to enter is held by a robot that
+    // is itself leaving this tick (follow/rotate) or by one that is staying put.
+    this.cellOccupant.clear();
+    for (const robot of this.state.robots) {
+      this.cellOccupant.set(
+        this.positionLevelKey(robot.position, robot.level),
+        robot.id,
+      );
+    }
+
     // Temporal reservation: book each mover's near-future cells/edges before
-    // anyone moves, so admission below is conflict-free and swap-free.
+    // anyone moves, so admission below is conflict-free and swap-free. The pass
+    // also records which robots secured their next hop (`movingOut`).
+    this.movingOut.clear();
     if (this.useTemporalReservation()) {
       this.buildReservationTable();
     }
@@ -555,11 +582,30 @@ export class SimulationEngine {
 
     const nextKey = this.positionLevelKey(next, robot.level);
     const isElevatorLane = this.isElevatorPosition(next);
-    if (
-      this.blockedCells.has(positionKey(next)) ||
-      (!isElevatorLane && (occupied.has(nextKey) || reserved.has(nextKey))) ||
-      (reservationActive && !isElevatorLane && !this.holdsReservation(robot, next))
-    ) {
+    const blockedByLayout = this.blockedCells.has(positionKey(next));
+    let blocked: boolean;
+    if (reservationActive && !isElevatorLane) {
+      // Trust the reservation layer instead of the instantaneous `occupied`
+      // set. The pre-pass already resolved, to a fixpoint, exactly which robots
+      // vacate their cell this tick (`movingOut`) — including coordinated
+      // rotations and follow-moves. The old physical `occupied` check forbade
+      // those and froze whole cycles into permanent gridlock.
+      blocked = blockedByLayout || !this.movingOut.has(robot.id);
+    } else {
+      blocked =
+        blockedByLayout ||
+        (!isElevatorLane && (occupied.has(nextKey) || reserved.has(nextKey)));
+    }
+    if (blocked) {
+      // A robot stuck for too long is almost certainly in a head-on / narrow-
+      // aisle deadlock the reservation layer can't resolve on its own. Let it
+      // yield: step to any free neighbour (including backwards) to break the
+      // symmetry, then replan next tick. This is what unjams the fleet.
+      const stuck = (this.stuckTicks.get(robot.id) ?? 0) + 1;
+      this.stuckTicks.set(robot.id, stuck);
+      if (stuck >= STUCK_EVASION_THRESHOLD && this.tryEvasiveStep(robot, occupied, reserved)) {
+        return;
+      }
       // Fixed = commit to the single trajectory and just wait (jams build up).
       // Periodic = occasionally replan around the blockage. Reactive already
       // replanned above this tick.
@@ -570,6 +616,7 @@ export class SimulationEngine {
       return;
     }
 
+    this.stuckTicks.set(robot.id, 0);
     robot.position = next;
     robot.path = robot.path.slice(1);
     robot.distanceTravelled += 1;
@@ -597,6 +644,65 @@ export class SimulationEngine {
     occupied.add(this.positionLevelKey(robot.position, robot.level));
     this.incrementCellWait(robot.position);
     this.incrementConnectorWait(robot.position);
+  }
+
+  /** Deadlock breaker. A robot that has been blocked for too long steps to any
+   *  free adjacent cell — including the one behind it — to break a head-on or
+   *  narrow-aisle standoff that the reservation layer forbids but never
+   *  resolves. The target must be empty at tick-start, unclaimed this tick, and
+   *  not booked as another robot's next hop, so the side-step can never cause a
+   *  collision. Returns true if it moved. */
+  private tryEvasiveStep(
+    robot: Robot,
+    occupied: Set<string>,
+    reserved: Set<string>,
+  ): boolean {
+    const level = robot.level;
+    const candidates = getNeighbors(
+      robot.position,
+      this.state.warehouse.width,
+      this.state.warehouse.height,
+    ).filter((cell) => {
+      if (this.blockedCells.has(positionKey(cell))) return false;
+      // Elevator lanes are a shared single-capacity resource — never squat one
+      // as a parking spot.
+      if (this.isElevatorPosition(cell)) return false;
+      const key = this.positionLevelKey(cell, level);
+      if (this.cellOccupant.has(key)) return false; // someone sits there
+      if (occupied.has(key) || reserved.has(key)) return false; // claimed this tick
+      // Booked as another robot's next hop under reservation?
+      if (this.reservationTable.get(`1:${level}:${positionKey(cell)}`) !== undefined) {
+        return false;
+      }
+      return true;
+    });
+    if (candidates.length === 0) {
+      return false;
+    }
+    candidates.sort(
+      (a, b) =>
+        deterministicJitter(
+          this.state.config.seeds.trafficSeed,
+          `${robot.id}:${this.state.tick}:${positionKey(a)}`,
+        ) -
+        deterministicJitter(
+          this.state.config.seeds.trafficSeed,
+          `${robot.id}:${this.state.tick}:${positionKey(b)}`,
+        ),
+    );
+    const step = candidates[0];
+    const energyDrain = this.state.config.robots.energyPerCell * this.massFactor;
+    robot.position = step;
+    robot.energyConsumed += energyDrain;
+    robot.battery = Math.max(0, robot.battery - energyDrain);
+    robot.distanceTravelled += 1;
+    robot.path = []; // force a fresh plan from the new cell next tick
+    this.stuckTicks.set(robot.id, 0);
+    reserved.add(this.positionLevelKey(step, level));
+    occupied.add(this.positionLevelKey(step, level));
+    this.incrementCellTraffic(step);
+    robot.recentEvents = addEvent(robot.recentEvents, "Yielding (deadlock)");
+    return true;
   }
 
   private handleArrival(robot: Robot): void {
@@ -1306,6 +1412,11 @@ export class SimulationEngine {
           this.scoreWithTrafficJitter(-b.waitingTicks, b.id),
       );
 
+    // First hop each robot secured (key = robot id -> target cell key). A robot
+    // that booked its offset-1 slot is a *candidate* mover; whether it really
+    // vacates is resolved by the fixpoint below.
+    const firstHopTarget = new Map<string, string>();
+
     for (const robot of movers) {
       if ((robot.path.length === 0 || policy === "reactive") && robot.destination) {
         robot.path = this.planPath(robot.position, robot.destination, robot);
@@ -1335,7 +1446,37 @@ export class SimulationEngine {
         ) {
           break;
         }
+        if (offset === 1) {
+          firstHopTarget.set(robot.id, this.positionLevelKey(cell, level));
+        }
         previous = cell;
+      }
+    }
+
+    // Resolve who actually moves. A candidate vacates its cell iff its target
+    // is empty at tick-start, or held by another candidate that also vacates.
+    // Pure rotation cycles (A→B→C→A) all move; chains that dead-end on a robot
+    // staying put get pruned back. Iterating to a fixpoint keeps cycles (every
+    // member still points inside the set) while removing blocked chains.
+    this.movingOut = new Set(firstHopTarget.keys());
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [robotId, targetKey] of firstHopTarget) {
+        if (!this.movingOut.has(robotId)) {
+          continue;
+        }
+        const occupant = this.cellOccupant.get(targetKey);
+        // Empty target, or self (shouldn't happen) → fine. Otherwise the
+        // occupant must itself be a confirmed mover.
+        if (
+          occupant !== undefined &&
+          occupant !== robotId &&
+          !this.movingOut.has(occupant)
+        ) {
+          this.movingOut.delete(robotId);
+          changed = true;
+        }
       }
     }
   }
@@ -1372,6 +1513,13 @@ const REFERENCE_MASS_KG = 57;
 
 /** How many future cells each robot books ahead under temporal reservation. */
 const RESERVATION_HORIZON = 6;
+
+/** Consecutive blocked ticks before a robot yields with an evasive side-step.
+ *  A last-resort deadlock breaker for head-on / narrow-aisle standoffs the
+ *  reservation layer can't resolve. Kept low: ordinary contention still costs
+ *  the robot a few ticks of queueing (so congestion genuinely shows up in the
+ *  saturation curve), but true gridlock clears quickly. */
+const STUCK_EVASION_THRESHOLD = 5;
 
 /** Undirected edge key between two adjacent cells, so a head-on swap (u→v and
  *  v→u in the same tick) collides on the same reservation slot. */

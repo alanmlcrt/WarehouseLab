@@ -950,6 +950,18 @@ function applyCombination(
     );
   }
 
+  // Couple the temporal-reservation flag to the pathfinding factor so the lab's
+  // "manhattan" / "astar" levels mean what they say: a fleet WITHOUT the
+  // cooperative booking pass. Otherwise the base preset's `temporalReservation:
+  // true` silently keeps reservation admission on for every level (since
+  // useTemporalReservation() ORs the two), making "manhattan" run as
+  // "manhattan search + reservation admission" — a confusing hybrid that breaks
+  // reproducibility and hides the real cost of poor coordination.
+  if (setFactorIds.has("pathfindingStrategy")) {
+    config.movement.temporalReservation =
+      config.movement.pathfindingStrategy === "reservation";
+  }
+
   // Clamp robotCount to a sensible density relative to warehouse floor area
   // so extreme combinations don't jam the grid with hundreds of robots.
   const maxRobotsForFloor = maxRobotsForArea(
@@ -1241,4 +1253,198 @@ export function getValueFromPoint(
   }
   const raw = point.metrics[columnId];
   return typeof raw === "number" ? raw : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Experiment templates — pre-configured LabPlans demonstrating key phenomena.
+// ---------------------------------------------------------------------------
+
+export interface ExperimentTemplate {
+  id: string;
+  title: string;
+  /** One-line explanation of what the chart will show. */
+  hypothesis: string;
+  icon: string;
+  seedCount: number;
+  simulatedMinutes: number;
+  warmupMinutes: number;
+  /** Factors swept across multiple values. */
+  variableFactors: Array<{ factorId: string; values: FactorValue[] }>;
+  /** Factors held constant (single value, overrides base config). */
+  contextFactors: Array<{ factorId: string; values: [FactorValue] }>;
+}
+
+export const EXPERIMENT_TEMPLATES: ExperimentTemplate[] = [
+  {
+    id: "robot_saturation",
+    title: "Saturation par robots (R*)",
+    hypothesis:
+      "Le débit grimpe, atteint R*, puis CHUTE : trop de robots saturent le goulot et se gênent",
+    icon: "📈",
+    seedCount: 20,
+    simulatedMinutes: 4,
+    warmupMinutes: 1,
+    variableFactors: [
+      // Seven points across the arc: steep climb → peak (R* ~16 robots) → sharp
+      // decline. Trace `steadyThroughputPerMinute` contre robotCount : la courbe
+      // monte, culmine vers R16 puis s'effondre quand la congestion au goulot
+      // l'emporte. Regular step-6 sequence: the config UI models numeric factors
+      // as a (start, end, step) range, so an irregular one is silently re-gridded.
+      { factorId: "robotCount", values: [4, 10, 16, 22, 28, 34, 40] },
+    ],
+    contextFactors: [
+      // The bell needs a genuine bottleneck. A SINGLE picking station on a
+      // SINGLE level forces every robot to funnel to one drop point, so added
+      // robots create real congestion instead of just spreading out. With 2-6
+      // stations the flow diffuses and you only get a plateau.
+      { factorId: "warehouseSize", values: ["s"] },
+      { factorId: "levelCount", values: [1] },
+      { factorId: "pickingStationCount", values: [1] },
+      // Demand above the single-station ceiling (supply-limited) so the peak
+      // (R* ~16 robots) sits inside the range, then congestion bites.
+      { factorId: "ordersPerMinute", values: [30] },
+      { factorId: "demandPattern", values: ["abc"] },
+      { factorId: "peakProfile", values: ["none"] },
+      // Generous chargers so battery isn't the bottleneck — isolate congestion.
+      { factorId: "chargingStationCount", values: [6] },
+      { factorId: "storageStrategy", values: ["abcStorage"] },
+      // manhattan + periodic = the first-commit movement model: a naive fleet
+      // with no cooperative booking, so congestion genuinely degrades throughput
+      // (the bell). applyCombination couples this to temporalReservation=false,
+      // so it's TRUE manhattan, not the reservation hybrid.
+      { factorId: "pathfindingStrategy", values: ["manhattan"] },
+      { factorId: "reroutingPolicy", values: ["periodic"] },
+    ],
+  },
+  {
+    id: "storage_strategies",
+    title: "Stockage : ABC vs random (croisement)",
+    hypothesis:
+      "ABC gagne à faible flotte (trajets courts), mais congestionne le goulot : à forte densité random le dépasse",
+    icon: "📦",
+    seedCount: 25,
+    simulatedMinutes: 4,
+    warmupMinutes: 1,
+    variableFactors: [
+      // The crossover only shows if you sweep the fleet size too: ABC's short
+      // trips win when robots are few, but ABC piles every robot into the hot
+      // zone by the stations, so past a density it congests and random (spread
+      // out) overtakes it. Trace `steadyThroughputPerMinute` vs robotCount,
+      // coloured by storageStrategy — the two lines cross.
+      { factorId: "storageStrategy", values: ["abcStorage", "randomStorage"] },
+      { factorId: "robotCount", values: [4, 10, 16, 22, 28, 34, 40] },
+    ],
+    contextFactors: [
+      // Same congesting bottleneck as the saturation case: 1 station, 1 level,
+      // naive manhattan — so the ABC hot-zone congestion actually bites.
+      { factorId: "warehouseSize", values: ["s"] },
+      { factorId: "levelCount", values: [1] },
+      { factorId: "pickingStationCount", values: [1] },
+      // High demand keeps it supply-limited so the congestion regime is reached.
+      { factorId: "ordersPerMinute", values: [60] },
+      // Locked by confound rule (storageStrategy → fix demandPattern).
+      { factorId: "demandPattern", values: ["abc"] },
+      { factorId: "peakProfile", values: ["none"] },
+      { factorId: "chargingStationCount", values: [6] },
+      { factorId: "pathfindingStrategy", values: ["manhattan"] },
+      { factorId: "reroutingPolicy", values: ["periodic"] },
+    ],
+  },
+  {
+    id: "peak_resilience",
+    title: "Robustesse aux pics",
+    hypothesis:
+      "Sous un pic ×3 la flotte craque ; plus elle est grande, mieux elle tient",
+    icon: "⚡",
+    seedCount: 20,
+    simulatedMinutes: 6,
+    warmupMinutes: 2,
+    variableFactors: [
+      { factorId: "peakProfile", values: ["none", "moderate", "intense"] },
+      { factorId: "robotCount", values: [8, 12, 16] },
+    ],
+    contextFactors: [
+      { factorId: "warehouseSize", values: ["s"] },
+      { factorId: "levelCount", values: [1] },
+      // Moderate base demand so the peak actually hurts.
+      { factorId: "ordersPerMinute", values: [25] },
+      { factorId: "demandPattern", values: ["abc"] },
+      { factorId: "pickingStationCount", values: [2] },
+      { factorId: "chargingStationCount", values: [4] },
+      { factorId: "storageStrategy", values: ["abcStorage"] },
+      { factorId: "pathfindingStrategy", values: ["reservation"] },
+      { factorId: "reroutingPolicy", values: ["reactive"] },
+    ],
+  },
+  {
+    id: "vertical_topology",
+    title: "Topologie verticale",
+    hypothesis:
+      "Ajouter des niveaux densifie le stockage mais allonge les cycles et la pression verticale",
+    icon: "🏗️",
+    seedCount: 20,
+    simulatedMinutes: 5,
+    warmupMinutes: 1,
+    variableFactors: [
+      { factorId: "levelCount", values: [1, 2, 3, 4] },
+    ],
+    contextFactors: [
+      { factorId: "warehouseSize", values: ["m"] },
+      { factorId: "ordersPerMinute", values: [30] },
+      { factorId: "demandPattern", values: ["abc"] },
+      { factorId: "peakProfile", values: ["none"] },
+      { factorId: "pickingStationCount", values: [3] },
+      { factorId: "chargingStationCount", values: [6] },
+      // Enough robots to handle vertical travel overhead at 4 levels.
+      { factorId: "robotCount", values: [18] },
+      { factorId: "storageStrategy", values: ["abcStorage"] },
+      { factorId: "pathfindingStrategy", values: ["reservation"] },
+      { factorId: "reroutingPolicy", values: ["reactive"] },
+    ],
+  },
+];
+
+/** Build a complete LabPlan from a template. Required factors not listed in
+ *  the template fall back to their registry defaults via ensureRequiredFactorValues. */
+export function buildPlanFromTemplate(template: ExperimentTemplate): LabPlan {
+  const base = buildDefaultLabPlan();
+
+  const variableMap = new Map(
+    template.variableFactors.map(({ factorId, values }) => [factorId, values]),
+  );
+  const contextMap = new Map(
+    template.contextFactors.map(({ factorId, values }) => [
+      factorId,
+      values as FactorValue[],
+    ]),
+  );
+
+  const factorRoles: Record<string, FactorRole> = {};
+  for (const binding of base.bindings) {
+    if (variableMap.has(binding.factorId)) {
+      factorRoles[binding.factorId] = "variable";
+    } else if (contextMap.has(binding.factorId)) {
+      factorRoles[binding.factorId] = "context";
+    } else {
+      factorRoles[binding.factorId] = "variable"; // lands on shelf (no values)
+    }
+  }
+
+  const bindings = base.bindings.map((binding) => {
+    if (variableMap.has(binding.factorId)) {
+      return { factorId: binding.factorId, values: variableMap.get(binding.factorId)! };
+    }
+    if (contextMap.has(binding.factorId)) {
+      return { factorId: binding.factorId, values: contextMap.get(binding.factorId)! };
+    }
+    return { factorId: binding.factorId, values: [] };
+  });
+
+  return ensureRequiredFactorValues({
+    bindings,
+    factorRoles,
+    seedCount: template.seedCount,
+    simulatedMinutes: template.simulatedMinutes,
+    warmupMinutes: template.warmupMinutes,
+  });
 }

@@ -12,6 +12,7 @@ import {
   type DragStartEvent,
 } from "@dnd-kit/core";
 import {
+  EXPERIMENT_TEMPLATES,
   FACTOR_REGISTRY,
   PEAK_PROFILE_PRESETS,
   WAREHOUSE_SIZE_PRESETS,
@@ -19,6 +20,7 @@ import {
   MIN_SEEDS,
   applyConfoundLocks,
   buildDefaultLabPlan,
+  buildPlanFromTemplate,
   computeLockedFactors,
   countPlanRuns,
   ensureRequiredFactorValues,
@@ -423,6 +425,32 @@ export function PlanEditor({
             ramenées à ce plafond — elles apparaîtront fusionnées dans les résultats.
           </div>
         ) : null}
+      </div>
+      {/* Template picker ------------------------------------------------ */}
+      <div className="rounded-lg border border-line bg-white p-3 shadow-sm">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+          Cas types — charger un plan préconfigurné
+        </div>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {EXPERIMENT_TEMPLATES.map((tpl) => (
+            <button
+              key={tpl.id}
+              className="flex flex-col gap-1 rounded-md border border-line bg-slate-50 p-2 text-left transition-colors hover:border-accent hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={isRunning}
+              onClick={() => onChange(buildPlanFromTemplate(tpl))}
+              type="button"
+              title={tpl.hypothesis}
+            >
+              <span className="text-base leading-none">{tpl.icon}</span>
+              <span className="text-xs font-semibold leading-tight text-ink">
+                {tpl.title}
+              </span>
+              <span className="text-[11px] leading-tight text-slate-500">
+                {tpl.hypothesis}
+              </span>
+            </button>
+          ))}
+        </div>
       </div>
       {/* Drag board ----------------------------------------------------- */}
       <DndContext

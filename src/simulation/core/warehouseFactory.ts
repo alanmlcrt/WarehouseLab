@@ -105,6 +105,13 @@ export function buildWarehouse(
     pickingStations,
     subMatrices,
   );
+  // Repair pass: racks are placed sequentially, so a location's access cell —
+  // chosen from neighbours not yet reserved — can later be overwritten by a
+  // rack placed on it, leaving the location reachable only from a blocked cell.
+  // A robot routed there waits forever (its destination is a wall), stranding
+  // itself and collapsing throughput. Re-point any such access cell to a
+  // genuinely traversable neighbour now that every cell type is final.
+  repairStorageAccess(cells, storageLocations, pickingStations);
   const { rails, switches } = createRailNetwork(
     cells,
     config,
@@ -716,6 +723,64 @@ function findAccessPosition(
     (candidate) =>
       inBounds(candidate, width, height) && !reserved.has(positionKey(candidate)),
   );
+}
+
+/** Cell types a robot can stand on / drive through. Anything else (rack,
+ *  blocked) is a wall and must never be a storage location's access cell. */
+const TRAVERSABLE_CELL_TYPES: ReadonlySet<Cell["type"]> = new Set([
+  "empty",
+  "rail",
+  "station",
+  "charger",
+  "elevator",
+]);
+
+/** Re-point every storage location whose access cell ended up on a wall to a
+ *  traversable orthogonal neighbour of its rack, and refresh the cached
+ *  station distance. Runs once after the whole layout is final. */
+function repairStorageAccess(
+  cells: Cell[],
+  storageLocations: StorageLocation[],
+  pickingStations: PickingStation[],
+): void {
+  const cellByKey = new Map(cells.map((cell) => [positionKey(cell), cell]));
+  const isTraversable = (position: GridPosition): boolean => {
+    const cell = cellByKey.get(positionKey(position));
+    return cell !== undefined && TRAVERSABLE_CELL_TYPES.has(cell.type);
+  };
+  // Access cells are shared across the levels of one rack, so resolve each
+  // distinct rack position once.
+  const repaired = new Map<string, GridPosition | null>();
+  for (const location of storageLocations) {
+    if (isTraversable(location.accessPosition)) {
+      continue;
+    }
+    const rackKey = positionKey(location.position);
+    let replacement = repaired.get(rackKey);
+    if (replacement === undefined) {
+      const neighbours: GridPosition[] = [
+        { x: location.position.x - 1, y: location.position.y },
+        { x: location.position.x + 1, y: location.position.y },
+        { x: location.position.x, y: location.position.y - 1 },
+        { x: location.position.x, y: location.position.y + 1 },
+      ];
+      replacement = neighbours.find(isTraversable) ?? null;
+      repaired.set(rackKey, replacement);
+    }
+    if (!replacement) {
+      // Fully walled-in rack (no traversable neighbour). Leave it as-is; it is
+      // effectively unreachable, but that is a layout-density artefact, not the
+      // sequential-overwrite bug this pass targets.
+      continue;
+    }
+    const baseDistance = Math.min(
+      ...pickingStations.map((station) =>
+        manhattanDistance(replacement as GridPosition, station.accessPosition),
+      ),
+    );
+    location.accessPosition = replacement;
+    location.distanceToNearestStation = baseDistance + location.level * 1.6;
+  }
 }
 
 function setCell(
