@@ -124,6 +124,8 @@ export function buildWarehouse(
     width: config.warehouse.width,
     height: config.warehouse.height,
     cells,
+    cellTrafficByLevel: levels.map(() => new Array<number>(cells.length).fill(0)),
+    cellWaitByLevel: levels.map(() => new Array<number>(cells.length).fill(0)),
     racks,
     storageLocations,
     pickingStations,

@@ -150,6 +150,11 @@ export interface Warehouse {
   width: number;
   height: number;
   cells: Cell[];
+  /** Per-level cumulative traffic/wait, parallel to `cells`: indexed
+   *  [levelIndex][cellIndex]. `cells[].trafficCount/waitCount` stay the
+   *  flattened total (sum over levels) used by the 2D heatmap. */
+  cellTrafficByLevel: number[][];
+  cellWaitByLevel: number[][];
   racks: Rack[];
   storageLocations: StorageLocation[];
   pickingStations: PickingStation[];

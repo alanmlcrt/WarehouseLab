@@ -53,26 +53,41 @@ function axisFont(compact?: boolean) {
 
 /** Y domain centred on the per-group means (± std), so outliers in the raw
  *  cloud don't crush the mean line into a flat band. Cloud points that fall
- *  outside the domain are clipped via `allowDataOverflow` on the axis. */
+ *  outside the domain are clipped via `allowDataOverflow` on the axis.
+ *
+ *  By default the floor hugs the mean band so small but real differences
+ *  between high-sitting groups stay visible — e.g. two storage strategies both
+ *  around 500 units. But it never drops below 0 for a non-negative metric (the
+ *  padding could push it slightly negative when the data dips near zero, which
+ *  reads as nonsense for e.g. a throughput). Pass `zeroBaseline` for bar charts,
+ *  where the encoding requires bars to start at 0 to be honest about proportions. */
 function meanCenteredYDomain(
   series: ExplorerSeries,
+  opts?: { zeroBaseline?: boolean },
 ): [number | string, number | string] {
   let lo = Infinity;
   let hi = -Infinity;
+  let loMean = Infinity;
   for (const stats of series.statsByGroup.values()) {
     for (const s of stats) {
       const band = Number.isFinite(s.std) ? s.std : 0;
       if (s.mean - band < lo) lo = s.mean - band;
       if (s.mean + band > hi) hi = s.mean + band;
+      if (s.mean < loMean) loMean = s.mean;
     }
   }
   if (!Number.isFinite(lo) || !Number.isFinite(hi)) return ["auto", "auto"];
+  // Bars: pin to 0. Otherwise zoom to the band, but clamp at 0 when the metric is
+  // non-negative — judged on the lowest *mean*, since a mean−std band can dip
+  // below 0 on a quantity (throughput, distance…) that never actually is.
+  const floor = (value: number) =>
+    opts?.zeroBaseline ? Math.min(0, value) : loMean >= 0 ? Math.max(0, value) : value;
   if (hi === lo) {
     const bump = Math.max(Math.abs(hi) * 0.05, 1);
-    return [Math.min(0, lo - bump), hi + bump];
+    return [floor(lo - bump), hi + bump];
   }
   const pad = (hi - lo) * 0.12;
-  return [Math.min(0, lo - pad), hi + pad];
+  return [floor(lo - pad), hi + pad];
 }
 
 function emptyState(message: string) {
@@ -410,7 +425,7 @@ export function BarsChart(props: ChartProps) {
     .filter((r): r is Record<string, number | string> => r !== null);
 
   const fz = axisFont(compact);
-  const yDomain = meanCenteredYDomain(series);
+  const yDomain = meanCenteredYDomain(series, { zeroBaseline: true });
 
   return (
     <ResponsiveContainer height="100%" width="100%">
@@ -496,10 +511,10 @@ export function BoxPlotChart(props: ChartProps) {
   if (series.count === 0) return emptyState("Aucun point exploitable.");
 
   const pad = (series.yMax - series.yMin) * 0.08 || 1;
-  const domain: [number, number] = [
-    Math.min(0, series.yMin - pad),
-    series.yMax + pad,
-  ];
+  // Zoom to the data, but don't let the padding push the floor below 0 when the
+  // metric is non-negative (a negative axis reads as nonsense for e.g. throughput).
+  const lo = series.yMin - pad;
+  const domain: [number, number] = [series.yMin >= 0 ? Math.max(0, lo) : lo, series.yMax + pad];
   const data = series.xLevels.map((level) => ({ level }));
   const fz = axisFont(compact);
 

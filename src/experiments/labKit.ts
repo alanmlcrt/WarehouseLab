@@ -594,6 +594,8 @@ export type LabPhysicalCellKind = Cell["type"];
 export interface LabPhysicalCell {
   x: number;
   y: number;
+  /** Floor index. Older snapshots without per-level capture omit it (level 0). */
+  level: number;
   type: LabPhysicalCellKind;
   traffic: number;
   wait: number;
@@ -602,6 +604,7 @@ export interface LabPhysicalCell {
 export interface LabPhysicalSnapshot {
   width: number;
   height: number;
+  levelCount: number;
   rackCount: number;
   stationCount: number;
   chargerCount: number;
@@ -1145,25 +1148,28 @@ function capturePhysicalSnapshot(state: SimulationState): LabPhysicalSnapshot {
   let maxTraffic = 0;
   let maxWait = 0;
   const cells: LabPhysicalCell[] = [];
+  const { cellTrafficByLevel, cellWaitByLevel } = state.warehouse;
+  const levelCount = Math.max(1, state.warehouse.levels.length);
 
-  for (const cell of state.warehouse.cells) {
-    maxTraffic = Math.max(maxTraffic, cell.trafficCount);
-    maxWait = Math.max(maxWait, cell.waitCount);
-    if (cell.type === "empty" && cell.trafficCount === 0 && cell.waitCount === 0) {
-      continue;
+  // One entry per (cell, floor): structural footprint repeats on every floor so
+  // each stacked plane reads as a real warehouse level; the heat differs per floor.
+  state.warehouse.cells.forEach((cell, index) => {
+    for (let level = 0; level < levelCount; level += 1) {
+      const traffic = cellTrafficByLevel[level]?.[index] ?? 0;
+      const wait = cellWaitByLevel[level]?.[index] ?? 0;
+      maxTraffic = Math.max(maxTraffic, traffic);
+      maxWait = Math.max(maxWait, wait);
+      if (cell.type === "empty" && traffic === 0 && wait === 0) {
+        continue;
+      }
+      cells.push({ x: cell.x, y: cell.y, level, type: cell.type, traffic, wait });
     }
-    cells.push({
-      x: cell.x,
-      y: cell.y,
-      type: cell.type,
-      traffic: cell.trafficCount,
-      wait: cell.waitCount,
-    });
-  }
+  });
 
   return {
     width: state.warehouse.width,
     height: state.warehouse.height,
+    levelCount,
     rackCount: state.warehouse.racks.length,
     stationCount: state.warehouse.pickingStations.length,
     chargerCount: state.warehouse.chargingStations.length,
@@ -1397,6 +1403,70 @@ export const EXPERIMENT_TEMPLATES: ExperimentTemplate[] = [
       { factorId: "chargingStationCount", values: [6] },
       // Enough robots to handle vertical travel overhead at 4 levels.
       { factorId: "robotCount", values: [18] },
+      { factorId: "storageStrategy", values: ["abcStorage"] },
+      { factorId: "pathfindingStrategy", values: ["reservation"] },
+      { factorId: "reroutingPolicy", values: ["reactive"] },
+    ],
+  },
+  {
+    id: "vertical_pressure",
+    title: "Pression verticale (M, 6 niveaux)",
+    hypothesis:
+      "Sur 6 niveaux, ajouter des robots cesse de payer une fois les ascenseurs saturés : le débit plafonne et la congestion migre vers les cages.",
+    icon: "🛗",
+    seedCount: 12,
+    simulatedMinutes: 4,
+    warmupMinutes: 1,
+    variableFactors: [
+      // Climb → plateau : à bas effectif le débit suit la flotte, puis bute sur
+      // la capacité des allées d'ascenseur (ressource partagée, 1 robot à la fois)
+      // que toute la hauteur doit traverser. Pas régulier de 8, comme l'exige le
+      // modèle (start, end, step) de l'éditeur de facteurs.
+      { factorId: "robotCount", values: [8, 16, 24, 32, 40, 48] },
+    ],
+    contextFactors: [
+      // Entrepôt réaliste : taille M, 6 niveaux, 3 stations de picking.
+      { factorId: "warehouseSize", values: ["m"] },
+      { factorId: "levelCount", values: [6] },
+      { factorId: "pickingStationCount", values: [3] },
+      // Demande au-dessus du plafond vertical (supply-limited) : le système ne
+      // rattrape jamais la demande, donc le goulot est bien l'ascenseur, pas la
+      // file de commandes.
+      { factorId: "ordersPerMinute", values: [45] },
+      { factorId: "demandPattern", values: ["abc"] },
+      { factorId: "peakProfile", values: ["none"] },
+      // Chargeurs généreux : la batterie n'est pas le goulot, on isole le vertical.
+      { factorId: "chargingStationCount", values: [8] },
+      { factorId: "storageStrategy", values: ["abcStorage"] },
+      // Flotte coordonnée (réservation + re-routage réactif) : le plateau vient
+      // d'une vraie limite de capacité, pas de collisions naïves.
+      { factorId: "pathfindingStrategy", values: ["reservation"] },
+      { factorId: "reroutingPolicy", values: ["reactive"] },
+    ],
+  },
+  {
+    id: "capacity_map",
+    title: "Carte de capacité (M, 6 niveaux)",
+    hypothesis:
+      "Croise flotte × cadence : la heatmap des Outils trace la frontière de faisabilité — combien de robots il faut pour tenir chaque débit avant que le backlog explose.",
+    icon: "🗺️",
+    seedCount: 8,
+    simulatedMinutes: 4,
+    warmupMinutes: 1,
+    // Deux facteurs croisés : c'est ce que la heatmap 2D des Outils sait afficher.
+    variableFactors: [
+      { factorId: "robotCount", values: [12, 24, 36, 48, 60] },
+      { factorId: "ordersPerMinute", values: [20, 30, 40, 50, 60] },
+    ],
+    contextFactors: [
+      // Entrepôt réaliste : taille M, 6 niveaux, 3 stations.
+      { factorId: "warehouseSize", values: ["m"] },
+      { factorId: "levelCount", values: [6] },
+      { factorId: "pickingStationCount", values: [3] },
+      { factorId: "demandPattern", values: ["abc"] },
+      // Régime stationnaire (pas de pic) : on lit une vraie capacité soutenue.
+      { factorId: "peakProfile", values: ["none"] },
+      { factorId: "chargingStationCount", values: [8] },
       { factorId: "storageStrategy", values: ["abcStorage"] },
       { factorId: "pathfindingStrategy", values: ["reservation"] },
       { factorId: "reroutingPolicy", values: ["reactive"] },

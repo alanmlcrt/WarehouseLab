@@ -49,7 +49,7 @@ const TOOLS: Tool[] = [
   {
     id: "physical-heatmap",
     label: "Plan chaud",
-    hint: "Recap physique d'un run : plan d'entrepot colore par trafic ou attente.",
+    hint: "Plan d'entrepot 3D : trafic ou attente moyen par cellule, comparable par strategie ou autre facteur.",
     render: (points) => <PhysicalHeatmapPanel points={points} />,
   },
   {

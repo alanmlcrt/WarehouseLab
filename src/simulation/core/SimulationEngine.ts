@@ -626,7 +626,7 @@ export class SimulationEngine {
     if (!isElevatorLane) {
       reserved.add(nextKey);
     }
-    this.incrementCellTraffic(next);
+    this.incrementCellTraffic(next, robot.level);
     this.incrementConnectorTraffic(next);
 
     if (samePosition(robot.position, robot.destination)) {
@@ -642,7 +642,7 @@ export class SimulationEngine {
     this.congestionEvents += 1;
     robot.recentEvents = addEvent(robot.recentEvents, "Waiting for cell");
     occupied.add(this.positionLevelKey(robot.position, robot.level));
-    this.incrementCellWait(robot.position);
+    this.incrementCellWait(robot.position, robot.level);
     this.incrementConnectorWait(robot.position);
   }
 
@@ -700,7 +700,7 @@ export class SimulationEngine {
     this.stuckTicks.set(robot.id, 0);
     reserved.add(this.positionLevelKey(step, level));
     occupied.add(this.positionLevelKey(step, level));
-    this.incrementCellTraffic(step);
+    this.incrementCellTraffic(step, level);
     robot.recentEvents = addEvent(robot.recentEvents, "Yielding (deadlock)");
     return true;
   }
@@ -1319,10 +1319,15 @@ export class SimulationEngine {
     return index !== undefined && this.state.warehouse.cells[index].type === "elevator";
   }
 
-  private incrementCellTraffic(position: GridPosition): void {
+  private incrementCellTraffic(position: GridPosition, level: number): void {
     const index = this.cellMap.get(positionKey(position));
-    if (index !== undefined) {
-      this.state.warehouse.cells[index].trafficCount += 1;
+    if (index === undefined) {
+      return;
+    }
+    this.state.warehouse.cells[index].trafficCount += 1;
+    const perLevel = this.state.warehouse.cellTrafficByLevel[level];
+    if (perLevel) {
+      perLevel[index] += 1;
     }
   }
 
@@ -1336,10 +1341,15 @@ export class SimulationEngine {
     }
   }
 
-  private incrementCellWait(position: GridPosition): void {
+  private incrementCellWait(position: GridPosition, level: number): void {
     const index = this.cellMap.get(positionKey(position));
-    if (index !== undefined) {
-      this.state.warehouse.cells[index].waitCount += 1;
+    if (index === undefined) {
+      return;
+    }
+    this.state.warehouse.cells[index].waitCount += 1;
+    const perLevel = this.state.warehouse.cellWaitByLevel[level];
+    if (perLevel) {
+      perLevel[index] += 1;
     }
   }
 
