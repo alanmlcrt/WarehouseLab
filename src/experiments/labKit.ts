@@ -587,6 +587,11 @@ export interface RunPoint {
   metrics: Record<string, number>;
   feasible: boolean;
   physicalSnapshot?: LabPhysicalSnapshot;
+  /** Exact resolved config the engine ran with (factors applied + per-seed
+   *  offsets). Because the engine is deterministic, loading this config
+   *  verbatim replays the run tick-for-tick in the 3D view. Optional: points
+   *  persisted before this field existed don't have it. */
+  config?: SimulationConfig;
 }
 
 export type LabPhysicalCellKind = Cell["type"];
@@ -832,6 +837,7 @@ export async function runLab({
         },
         feasible: steady.steadyThroughputPerMinute >= demand * 0.98,
         physicalSnapshot: capturePhysicalSnapshot(snapshot),
+        config,
       };
       points.push(point);
       completed += 1;
@@ -1285,98 +1291,99 @@ export const EXPERIMENT_TEMPLATES: ExperimentTemplate[] = [
     id: "robot_saturation",
     title: "Saturation par robots (R*)",
     hypothesis:
-      "Le débit grimpe, atteint R*, puis CHUTE : trop de robots saturent le goulot et se gênent",
+      "Sur un entrepôt réaliste (M, 6 niveaux, 3 stations) le débit grimpe, culmine vers R*≈40 robots, puis recule : ascenseurs et picking saturent et la congestion explose (×40)",
     icon: "📈",
-    seedCount: 20,
-    simulatedMinutes: 4,
-    warmupMinutes: 1,
+    seedCount: 16,
+    simulatedMinutes: 5,
+    warmupMinutes: 2,
     variableFactors: [
-      // Seven points across the arc: steep climb → peak (R* ~16 robots) → sharp
-      // decline. Trace `steadyThroughputPerMinute` contre robotCount : la courbe
-      // monte, culmine vers R16 puis s'effondre quand la congestion au goulot
-      // l'emporte. Regular step-6 sequence: the config UI models numeric factors
-      // as a (start, end, step) range, so an irregular one is silently re-gridded.
-      { factorId: "robotCount", values: [4, 10, 16, 22, 28, 34, 40] },
+      // Climb → R*≈40 → léger recul. Trace `steadyThroughputPerMinute` contre
+      // robotCount : la courbe monte, plafonne puis recule quand la congestion
+      // (×40 entre 8 et 56 robots) l'emporte. Pas régulier de 8, comme l'exige
+      // le modèle (start, end, step) de l'éditeur de facteurs.
+      // Vérifié headless (8 seeds) : 16.9→26.5→32.1→33.4→34.5→34.0→31.7.
+      { factorId: "robotCount", values: [8, 16, 24, 32, 40, 48, 56] },
     ],
     contextFactors: [
-      // The bell needs a genuine bottleneck. A SINGLE picking station on a
-      // SINGLE level forces every robot to funnel to one drop point, so added
-      // robots create real congestion instead of just spreading out. With 2-6
-      // stations the flow diffuses and you only get a plateau.
-      { factorId: "warehouseSize", values: ["s"] },
-      { factorId: "levelCount", values: [1] },
-      { factorId: "pickingStationCount", values: [1] },
-      // Demand above the single-station ceiling (supply-limited) so the peak
-      // (R* ~16 robots) sits inside the range, then congestion bites.
-      { factorId: "ordersPerMinute", values: [30] },
+      // Entrepôt réaliste : M, 6 niveaux, 3 stations de picking. Le goulot n'est
+      // plus un montage jouet (1 station / 1 niveau) mais les vraies ressources
+      // partagées d'un entrepôt en hauteur : cages d'ascenseur (1 robot à la fois)
+      // et files de picking.
+      { factorId: "warehouseSize", values: ["m"] },
+      { factorId: "levelCount", values: [6] },
+      { factorId: "pickingStationCount", values: [3] },
+      // Demande au-dessus du plafond soutenable (supply-limited) : le système ne
+      // rattrape jamais la file, donc le goulot est bien la capacité interne.
+      { factorId: "ordersPerMinute", values: [55] },
       { factorId: "demandPattern", values: ["abc"] },
       { factorId: "peakProfile", values: ["none"] },
-      // Generous chargers so battery isn't the bottleneck — isolate congestion.
-      { factorId: "chargingStationCount", values: [6] },
+      // Chargeurs généreux : la batterie n'est pas le goulot, on isole la congestion.
+      { factorId: "chargingStationCount", values: [8] },
       { factorId: "storageStrategy", values: ["abcStorage"] },
-      // manhattan + periodic = the first-commit movement model: a naive fleet
-      // with no cooperative booking, so congestion genuinely degrades throughput
-      // (the bell). applyCombination couples this to temporalReservation=false,
-      // so it's TRUE manhattan, not the reservation hybrid.
-      { factorId: "pathfindingStrategy", values: ["manhattan"] },
-      { factorId: "reroutingPolicy", values: ["periodic"] },
+      // Flotte coordonnée (réservation + re-routage réactif) : le recul vient
+      // d'une vraie limite de capacité physique, pas de collisions naïves.
+      { factorId: "pathfindingStrategy", values: ["reservation"] },
+      { factorId: "reroutingPolicy", values: ["reactive"] },
     ],
   },
   {
     id: "storage_strategies",
-    title: "Stockage : ABC vs random (croisement)",
+    title: "Stockage : ABC vs random",
     hypothesis:
-      "ABC gagne à faible flotte (trajets courts), mais congestionne le goulot : à forte densité random le dépasse",
+      "Sur un entrepôt réaliste (M, 6 niveaux), ABC écrase random partout (×2 sur le débit) : trajets courts ET moins de congestion. L'écart persiste même à forte flotte — aucun croisement",
     icon: "📦",
-    seedCount: 25,
-    simulatedMinutes: 4,
-    warmupMinutes: 1,
+    seedCount: 20,
+    simulatedMinutes: 5,
+    warmupMinutes: 2,
     variableFactors: [
-      // The crossover only shows if you sweep the fleet size too: ABC's short
-      // trips win when robots are few, but ABC piles every robot into the hot
-      // zone by the stations, so past a density it congests and random (spread
-      // out) overtakes it. Trace `steadyThroughputPerMinute` vs robotCount,
-      // coloured by storageStrategy — the two lines cross.
+      // On balaie aussi la taille de flotte pour montrer que l'avantage ABC ne
+      // s'érode pas : sur un entrepôt multi-niveaux coordonné, ABC garde ~+10 à
+      // +20 caisses/min sur random à tous les effectifs. Trace
+      // `steadyThroughputPerMinute` vs robotCount, coloré par storageStrategy :
+      // deux courbes parallèles, ABC nettement au-dessus (pas de croisement).
+      // Vérifié headless (8 seeds, demande 45) : écart ABC-random 10.5→16.8.
       { factorId: "storageStrategy", values: ["abcStorage", "randomStorage"] },
-      { factorId: "robotCount", values: [4, 10, 16, 22, 28, 34, 40] },
+      { factorId: "robotCount", values: [8, 16, 24, 32, 40, 48] },
     ],
     contextFactors: [
-      // Same congesting bottleneck as the saturation case: 1 station, 1 level,
-      // naive manhattan — so the ABC hot-zone congestion actually bites.
-      { factorId: "warehouseSize", values: ["s"] },
-      { factorId: "levelCount", values: [1] },
-      { factorId: "pickingStationCount", values: [1] },
-      // High demand keeps it supply-limited so the congestion regime is reached.
-      { factorId: "ordersPerMinute", values: [60] },
-      // Locked by confound rule (storageStrategy → fix demandPattern).
+      // Entrepôt réaliste : M, 6 niveaux, 3 stations, flotte coordonnée.
+      { factorId: "warehouseSize", values: ["m"] },
+      { factorId: "levelCount", values: [6] },
+      { factorId: "pickingStationCount", values: [3] },
+      // Demande supply-limited pour que la qualité du rangement compte vraiment.
+      { factorId: "ordersPerMinute", values: [50] },
+      // Verrouillé par la règle de confusion (storageStrategy → fixe demandPattern).
       { factorId: "demandPattern", values: ["abc"] },
       { factorId: "peakProfile", values: ["none"] },
-      { factorId: "chargingStationCount", values: [6] },
-      { factorId: "pathfindingStrategy", values: ["manhattan"] },
-      { factorId: "reroutingPolicy", values: ["periodic"] },
+      { factorId: "chargingStationCount", values: [8] },
+      { factorId: "pathfindingStrategy", values: ["reservation"] },
+      { factorId: "reroutingPolicy", values: ["reactive"] },
     ],
   },
   {
     id: "peak_resilience",
     title: "Robustesse aux pics",
     hypothesis:
-      "Sous un pic ×3 la flotte craque ; plus elle est grande, mieux elle tient",
+      "Sur un entrepôt réaliste (M, 6 niveaux), sous un pic ×3 le backlog explose et le taux de service s'effondre ; plus la flotte est grande, mieux elle encaisse",
     icon: "⚡",
-    seedCount: 20,
-    simulatedMinutes: 6,
+    seedCount: 16,
+    simulatedMinutes: 7,
     warmupMinutes: 2,
     variableFactors: [
       { factorId: "peakProfile", values: ["none", "moderate", "intense"] },
-      { factorId: "robotCount", values: [8, 12, 16] },
+      { factorId: "robotCount", values: [16, 24, 32] },
     ],
     contextFactors: [
-      { factorId: "warehouseSize", values: ["s"] },
-      { factorId: "levelCount", values: [1] },
-      // Moderate base demand so the peak actually hurts.
-      { factorId: "ordersPerMinute", values: [25] },
+      // Entrepôt réaliste : M, 6 niveaux, 3 stations.
+      { factorId: "warehouseSize", values: ["m"] },
+      { factorId: "levelCount", values: [6] },
+      { factorId: "pickingStationCount", values: [3] },
+      // Demande de base proche du plafond pour que le pic fasse vraiment mal.
+      // Vérifié headless : backlog 58→273 (none→intense à 16 robots), service
+      // 65%→31% ; la flotte 32 amortit (service intense 41%).
+      { factorId: "ordersPerMinute", values: [38] },
       { factorId: "demandPattern", values: ["abc"] },
-      { factorId: "pickingStationCount", values: [2] },
-      { factorId: "chargingStationCount", values: [4] },
+      { factorId: "chargingStationCount", values: [8] },
       { factorId: "storageStrategy", values: ["abcStorage"] },
       { factorId: "pathfindingStrategy", values: ["reservation"] },
       { factorId: "reroutingPolicy", values: ["reactive"] },

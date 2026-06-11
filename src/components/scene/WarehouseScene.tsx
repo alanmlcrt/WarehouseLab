@@ -27,8 +27,16 @@ import {
 import type { SceneSelection } from "../../types/selection";
 import { cellId } from "../../utils/grid";
 
-export function WarehouseScene() {
-  const snapshot = useSimulationStore((state) => state.snapshot);
+export function WarehouseScene({
+  snapshot: snapshotOverride,
+}: {
+  /** Render this state instead of the live store snapshot. Used by the lab's
+   *  Plan tab to show a static 3D preview of the warehouse being designed
+   *  without touching the running simulation. */
+  snapshot?: SimulationState;
+} = {}) {
+  const storeSnapshot = useSimulationStore((state) => state.snapshot);
+  const snapshot = snapshotOverride ?? storeSnapshot;
   const selected = useSimulationStore((state) => state.selected);
   const select = useSimulationStore((state) => state.select);
   const heatmapMode = useSimulationStore((state) => state.heatmapMode);

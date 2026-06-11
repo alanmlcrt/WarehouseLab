@@ -61,6 +61,9 @@ interface SimulationStore {
   clearRuns: () => void;
   enterLab: () => void;
   exitLab: () => void;
+  /** Replay a lab run in the 3D view: loads the run's exact config (seeds
+   *  included) into the worker and starts playback from tick 0. */
+  replayLabRun: (point: RunPoint) => void;
   updateLabPlan: (plan: LabPlan) => void;
   runLabExperiment: () => Promise<void>;
   clearLabResults: () => void;
@@ -85,7 +88,10 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   heatmapMode: "off",
   storageViewMode: "off",
   runHistory: [],
-  labMode: false,
+  // Lab is the landing page. The 3D simulation view is a sub-view reached from
+  // the lab (replay a run, or "Voir en 3D" from the Plan tab) and exited via
+  // the TopBar's "← Lab" button.
+  labMode: true,
   labPlan: loadStoredLabPlan(),
   labResults: loadStoredLabResults(),
   labProgress: null,
@@ -167,6 +173,26 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   clearRuns: () => set({ runHistory: [] }),
   enterLab: () => set({ labMode: true }),
   exitLab: () => set({ labMode: false }),
+  replayLabRun: (point) => {
+    if (!point.config) {
+      set({
+        labError:
+          "Ce run ne porte pas sa configuration (résultat antérieur) — relance l'expérience pour pouvoir le rejouer.",
+      });
+      return;
+    }
+    // "replay" (not updateConfig): the worker must keep the run's seeds
+    // verbatim, normalizeConfig would rebuild them from the master seed.
+    post({ type: "replay", config: point.config });
+    post({ type: "play" });
+    set({
+      labMode: false,
+      isRunning: true,
+      selected: null,
+      scenarioId: point.config.scenarioId,
+      labError: null,
+    });
+  },
   updateLabPlan: (labPlan) => {
     storeLabPlan(labPlan);
     set({ labPlan });

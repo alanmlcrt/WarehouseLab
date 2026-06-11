@@ -4,6 +4,7 @@ import {
   METRIC_COLUMNS,
   type RunPoint,
 } from "../../experiments/labKit";
+import { useSimulationStore } from "../../store/simulationStore";
 
 interface DataTableProps {
   points: RunPoint[];
@@ -19,6 +20,7 @@ export function DataTable({ points }: DataTableProps) {
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [feasibleOnly, setFeasibleOnly] = useState(false);
   const [search, setSearch] = useState("");
+  const replayLabRun = useSimulationStore((state) => state.replayLabRun);
 
   const filteredPoints = useMemo(() => {
     return points.filter((point) => {
@@ -108,6 +110,14 @@ export function DataTable({ points }: DataTableProps) {
                 active={false}
                 direction={sortDirection}
                 onClick={() => undefined}
+                width={40}
+              >
+                3D
+              </Th>
+              <Th
+                active={false}
+                direction={sortDirection}
+                onClick={() => undefined}
                 width={150}
               >
                 Run
@@ -149,6 +159,21 @@ export function DataTable({ points }: DataTableProps) {
                 }`}
                 key={point.id}
               >
+                <td className="px-2 py-1 text-center">
+                  <button
+                    className="rounded border border-line bg-white px-1.5 py-0.5 text-[10px] hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-30"
+                    disabled={!point.config}
+                    onClick={() => replayLabRun(point)}
+                    title={
+                      point.config
+                        ? "Rejouer ce run dans la vue 3D (déterministe : mêmes seeds, même déroulé)"
+                        : "Résultat antérieur sans configuration — relance l'expérience pour le rejouer"
+                    }
+                    type="button"
+                  >
+                    ▶
+                  </button>
+                </td>
                 <td className="px-2 py-1 font-mono text-[10px] text-slate-500">
                   {point.id}
                 </td>

@@ -2,11 +2,12 @@ import { useEffect, useState } from "react";
 import { useSimulationStore } from "../../store/simulationStore";
 import { AdvancedPanel } from "./AdvancedPanel";
 import { CampaignManager } from "./CampaignManager";
+import { DataTable } from "./DataTable";
 import { ExplorerView } from "./ExplorerView";
 import { Plan2DPage } from "./Plan2DPage";
 import { PlanEditor } from "./PlanEditor";
 
-type LabTab = "plan2d" | "config" | "explorer" | "tools" | "campaigns";
+type LabTab = "plan2d" | "config" | "explorer" | "data" | "tools" | "campaigns";
 
 const TABS: Array<{
   id: LabTab;
@@ -15,9 +16,10 @@ const TABS: Array<{
   /** Requires a result dataset to be useful. */
   needsResults?: true;
 }> = [
-  { id: "plan2d", label: "Plan 2D", description: "Dessiner l'entrepot de base et appliquer sa configuration" },
+  { id: "plan2d", label: "Plan", description: "Dessiner l'entrepôt de base, le voir en 2D ou 3D, et appliquer sa configuration" },
   { id: "config", label: "Configurer", description: "Choisir ce qui est fixé et ce qu'on fait varier" },
   { id: "explorer", label: "Explorer", description: "Tracer librement un paramètre contre une métrique", needsResults: true },
+  { id: "data", label: "Données", description: "Chaque run individuel : filtrer, exporter, rejouer en 3D", needsResults: true },
   { id: "tools", label: "Outils", description: "Interactions, corrélations, régression, tests…", needsResults: true },
   { id: "campaigns", label: "Campagnes", description: "Sauvegarder et recharger une étude" },
 ];
@@ -31,7 +33,6 @@ export function LabPage() {
   const updatePlan = useSimulationStore((state) => state.updateLabPlan);
   const runExperiment = useSimulationStore((state) => state.runLabExperiment);
   const clearResults = useSimulationStore((state) => state.clearLabResults);
-  const exitLab = useSimulationStore((state) => state.exitLab);
 
   const [tab, setTab] = useState<LabTab>("plan2d");
   const hasResults = results.length > 0;
@@ -46,7 +47,7 @@ export function LabPage() {
 
   return (
     <div className="grid h-full grid-rows-[56px_minmax(0,1fr)] overflow-hidden bg-[#eef3f8]">
-      <header className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border-b border-line bg-white px-4">
+      <header className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-3 border-b border-line bg-white px-4">
         <div className="flex min-w-[150px] items-center gap-2">
           <span className="text-base font-semibold text-ink">Warehouse Lab</span>
           {hasResults ? (
@@ -79,13 +80,6 @@ export function LabPage() {
             );
           })}
         </nav>
-        <button
-          className="shrink-0 rounded-md border border-line bg-white px-3 py-1.5 text-sm font-semibold text-slate-600 hover:bg-slate-100"
-          onClick={exitLab}
-          type="button"
-        >
-          Quitter
-        </button>
       </header>
       <main className="min-h-0 p-3">
         {tab === "plan2d" ? (
@@ -104,6 +98,7 @@ export function LabPage() {
           />
         ) : null}
         {tab === "explorer" ? <ExplorerView points={results} /> : null}
+        {tab === "data" ? <DataTable points={results} /> : null}
         {tab === "tools" ? <AdvancedPanel points={results} /> : null}
         {tab === "campaigns" ? <CampaignManager /> : null}
       </main>

@@ -25,6 +25,13 @@ export type SimulationWorkerRequest =
   | {
       type: "updateConfig";
       config: SimulationConfig;
+    }
+  | {
+      /** Load a config verbatim, WITHOUT normalizeConfig. Used to replay a lab
+       *  run: the per-seed offsets baked into `config.seeds` must survive,
+       *  whereas updateConfig rebuilds all seeds from the layout master seed. */
+      type: "replay";
+      config: SimulationConfig;
     };
 
 export type SimulationWorkerResponse =

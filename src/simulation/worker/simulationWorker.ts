@@ -32,6 +32,9 @@ function handleMessage(message: SimulationWorkerRequest): void {
     case "updateConfig":
       loadSimulation(message.config);
       break;
+    case "replay":
+      loadSimulation(message.config, true);
+      break;
     case "play":
       isRunning = true;
       ensureLoop();
@@ -43,7 +46,9 @@ function handleMessage(message: SimulationWorkerRequest): void {
       break;
     case "reset":
       if (currentConfig) {
-        loadSimulation(currentConfig);
+        // Verbatim reload: currentConfig was already normalized when it came
+        // through init/updateConfig, and replay configs must keep their seeds.
+        loadSimulation(currentConfig, true);
       }
       break;
     case "setSpeed":
@@ -53,8 +58,14 @@ function handleMessage(message: SimulationWorkerRequest): void {
   }
 }
 
-function loadSimulation(config: SimulationConfig): void {
-  currentConfig = cloneConfig(config);
+function loadSimulation(config: SimulationConfig, preserveSeeds = false): void {
+  // preserveSeeds: replay path. cloneConfig→normalizeConfig would rebuild every
+  // seed from the layout master seed and lose the lab run's exact seed offsets,
+  // so replays deep-clone verbatim. `reset` keeps replaying the same run because
+  // currentConfig already holds the preserved seeds.
+  currentConfig = preserveSeeds
+    ? (JSON.parse(JSON.stringify(config)) as SimulationConfig)
+    : cloneConfig(config);
   engine = new SimulationEngine(currentConfig);
   isRunning = false;
   ensureLoop();

@@ -140,9 +140,10 @@ export function TopBar() {
         <button
           className="rounded-md bg-ink px-3 py-2 text-sm font-semibold text-white"
           onClick={enterLab}
+          title="Revenir au laboratoire (page principale)"
           type="button"
         >
-          Lab
+          ← Lab
         </button>
         <button
           className="rounded-md border border-line bg-white px-3 py-2 text-sm font-semibold disabled:opacity-50"
