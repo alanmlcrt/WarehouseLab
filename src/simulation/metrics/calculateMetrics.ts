@@ -34,6 +34,12 @@ export function createEmptyMetrics(): SimulationMetrics {
     slowMovingStorageDistance: 0,
     slottingEfficiency: 0,
     verticalPressure: 0,
+    stationUtilization: 0,
+    elevatorUtilization: 0,
+    chargerUtilization: 0,
+    fleetUtilization: 0,
+    floorCongestion: 0,
+    stationQueueLength: 0,
     series: [],
   };
 }
@@ -147,6 +153,63 @@ export function calculateMetrics(input: MetricsInput): SimulationMetrics {
   };
   const slotting = input.slotting ?? calculateSlottingMetrics(input.warehouse);
 
+  // ---- Per-resource utilization (binding-bottleneck attribution) -----------
+  // Each link of the throughput chain is expressed as occupied-ticks / capacity,
+  // a 0..1 ratio. The lab compares them to pinpoint which resource saturates.
+  const ticks = Math.max(1, input.tick);
+  const stations = input.warehouse.pickingStations;
+  const totalLanes = stations.reduce(
+    (sum, station) => sum + Math.max(1, station.accessPositions.length),
+    0,
+  );
+  const stationBusyTicks = stations.reduce(
+    (sum, station) => sum + station.busyTicks,
+    0,
+  );
+  const stationUtilization = clamp01(
+    stationBusyTicks / (ticks * Math.max(1, totalLanes)),
+  );
+  const stationQueueLength = stations.reduce(
+    (sum, station) => sum + station.queueLength,
+    0,
+  );
+  const cages = input.warehouse.elevatorZones.length;
+  const elevatorBusyTicks = input.warehouse.elevatorZones.reduce(
+    (sum, elevator) => sum + elevator.busyTicks,
+    0,
+  );
+  const elevatorUtilization =
+    cages === 0 ? 0 : clamp01(elevatorBusyTicks / (ticks * cages));
+  const chargerCount = input.warehouse.chargingStations.length;
+  const chargerUtilization =
+    chargerCount === 0 ? 0 : clamp01(chargingTicks / (ticks * chargerCount));
+  // Floor congestion: share of robot-ticks lost to blocked moves (waiting for an
+  // occupied cell). High value = the aisles/grid are the bottleneck, not a resource.
+  const waitingTicks = input.robots.reduce(
+    (sum, robot) => sum + robot.waitingTicks,
+    0,
+  );
+  const floorCongestion =
+    input.robots.length === 0
+      ? 0
+      : clamp01(waitingTicks / (ticks * input.robots.length));
+  // Fleet utilization measures *productive* robot-ticks — time spent actually
+  // moving toward / handling orders, with blocked-waiting and charging removed.
+  // (averageRobotUtilization counts every non-idle tick, so it sits near 100%
+  // and tells you nothing about whether the fleet is the binding constraint.)
+  const activeTicksTotal = input.robots.reduce(
+    (sum, robot) => sum + robot.activeTicks,
+    0,
+  );
+  const productiveTicks = Math.max(
+    0,
+    activeTicksTotal - waitingTicks - chargingTicks,
+  );
+  const fleetUtilization =
+    input.robots.length === 0
+      ? 0
+      : clamp01(productiveTicks / (ticks * input.robots.length));
+
   return {
     completedOrders,
     averageProcessingTime,
@@ -176,8 +239,21 @@ export function calculateMetrics(input: MetricsInput): SimulationMetrics {
     verticalPressure:
       (elevatorWaitTicks + elevatorRideTicks) /
       Math.max(1, input.tick * Math.max(1, input.warehouse.elevatorZones.length)),
+    stationUtilization,
+    elevatorUtilization,
+    chargerUtilization,
+    fleetUtilization,
+    floorCongestion,
+    stationQueueLength,
     series: [...input.previousSeries, sample].slice(-240),
   };
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(1, value));
 }
 
 export function calculateSlottingMetrics(

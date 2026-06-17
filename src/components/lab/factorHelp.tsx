@@ -470,6 +470,7 @@ export const FACTOR_HELP: Record<string, FactorHelp> = {
           "Pour comparer plusieurs stratégies, fixe la taille à S ou M — sinon le total d'essais explose et le bruit augmente.",
           "Sur XL, augmente `Durée simulée` à 5–10 min pour atteindre l'état stationnaire avant de mesurer.",
           "Les KPI structurels `warehouseWidth` / `warehouseHeight` / `effectiveRackCount` te disent ce qui a réellement été construit.",
+          "Quand tu fais varier la taille SANS fixer `Commandes / min`, la demande suit automatiquement la surface (densité de flux constante, ~13 cmd/min par 100 cellules) : chaque taille est chargée à proportion, ce qui rend visible le point de saturation propre à chacune. Fixe `Commandes / min` explicitement pour garder une demande identique partout.",
         ]}
       />
     ),

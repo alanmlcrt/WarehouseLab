@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
 import {
+  BOTTLENECK_LABELS,
+  bottleneckFromCode,
   FACTOR_REGISTRY,
   METRIC_COLUMNS,
   type RunPoint,
@@ -185,7 +187,11 @@ export function DataTable({ points }: DataTableProps) {
                 ))}
                 {METRIC_COLUMNS.map((column) => (
                   <td className="px-2 py-1 text-right" key={`m-${column.id}`}>
-                    {formatValue(point.metrics[column.id])}
+                    {column.id === "bottleneck"
+                      ? BOTTLENECK_LABELS[
+                          bottleneckFromCode(point.metrics[column.id] ?? 0)
+                        ]
+                      : formatValue(point.metrics[column.id])}
                   </td>
                 ))}
               </tr>

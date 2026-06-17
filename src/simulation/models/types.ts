@@ -43,6 +43,9 @@ export interface ElevatorZone {
   queueLength: number;
   tripsCompleted: number;
   busy: boolean;
+  /** Cumulative ticks this cage was occupied (`busy === true`). Used to derive
+   *  elevator utilization — the binding constraint for multi-level layouts. */
+  busyTicks: number;
   reservedBy?: EntityId;
 }
 
@@ -122,6 +125,9 @@ export interface PickingStation {
   queueLength: number;
   processedOrders: number;
   active: boolean;
+  /** Cumulative occupied-lane-ticks: each tick, the number of drop lanes
+   *  (`accessPositions`) occupied by a robot dropping off here. Divided by
+   *  (ticks × lane count) it yields the station's utilization. */
   busyTicks: number;
 }
 
@@ -415,6 +421,17 @@ export interface SimulationMetrics {
   slowMovingStorageDistance: number;
   slottingEfficiency: number;
   verticalPressure: number;
+  /** Per-resource utilization (0..1) of each link in the throughput chain.
+   *  Used by the lab to attribute *which* resource is the binding bottleneck
+   *  at a given operating point. */
+  stationUtilization: number;
+  elevatorUtilization: number;
+  chargerUtilization: number;
+  fleetUtilization: number;
+  /** Floor-congestion index (0..1): share of robot-ticks lost to blocked moves. */
+  floorCongestion: number;
+  /** Total orders waiting across all picking stations (queue depth). */
+  stationQueueLength: number;
   series: MetricSample[];
 }
 

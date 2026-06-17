@@ -1,13 +1,21 @@
 import { useEffect, useState } from "react";
 import { useSimulationStore } from "../../store/simulationStore";
 import { AdvancedPanel } from "./AdvancedPanel";
+import { BottleneckView } from "./BottleneckView";
 import { CampaignManager } from "./CampaignManager";
 import { DataTable } from "./DataTable";
 import { ExplorerView } from "./ExplorerView";
 import { Plan2DPage } from "./Plan2DPage";
 import { PlanEditor } from "./PlanEditor";
 
-type LabTab = "plan2d" | "config" | "explorer" | "data" | "tools" | "campaigns";
+type LabTab =
+  | "plan2d"
+  | "config"
+  | "explorer"
+  | "bottleneck"
+  | "data"
+  | "tools"
+  | "campaigns";
 
 const TABS: Array<{
   id: LabTab;
@@ -19,6 +27,7 @@ const TABS: Array<{
   { id: "plan2d", label: "Plan", description: "Dessiner l'entrepôt de base, le voir en 2D ou 3D, et appliquer sa configuration" },
   { id: "config", label: "Configurer", description: "Choisir ce qui est fixé et ce qu'on fait varier" },
   { id: "explorer", label: "Explorer", description: "Tracer librement un paramètre contre une métrique", needsResults: true },
+  { id: "bottleneck", label: "Goulot", description: "Voir quel maillon (stations, ascenseurs, chargeurs, congestion, flotte) plafonne le débit à chaque point", needsResults: true },
   { id: "data", label: "Données", description: "Chaque run individuel : filtrer, exporter, rejouer en 3D", needsResults: true },
   { id: "tools", label: "Outils", description: "Interactions, corrélations, régression, tests…", needsResults: true },
   { id: "campaigns", label: "Campagnes", description: "Sauvegarder et recharger une étude" },
@@ -98,6 +107,7 @@ export function LabPage() {
           />
         ) : null}
         {tab === "explorer" ? <ExplorerView points={results} /> : null}
+        {tab === "bottleneck" ? <BottleneckView points={results} /> : null}
         {tab === "data" ? <DataTable points={results} /> : null}
         {tab === "tools" ? <AdvancedPanel points={results} /> : null}
         {tab === "campaigns" ? <CampaignManager /> : null}

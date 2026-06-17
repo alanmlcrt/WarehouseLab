@@ -828,7 +828,8 @@ export class SimulationEngine {
     if (station) {
       station.processedOrders += 1;
       station.active = true;
-      station.busyTicks += 1;
+      // busyTicks is accumulated per-tick from real lane occupancy in
+      // updateStationState(); do not double-count it on delivery here.
     }
 
     const task = robot.currentTaskId
@@ -916,16 +917,28 @@ export class SimulationEngine {
       station.queueLength = this.state.orders.filter(
         (order) => order.stationId === station.id && order.status !== "completed",
       ).length;
-      station.active = this.state.robots.some(
-        (robot) =>
-          robot.assignedOrderId &&
-          robot.destination &&
-          station.accessPositions.some((cell) =>
-            samePosition(robot.destination!, cell),
-          ),
+      // Occupied lanes = robots physically dropping off on one of this station's
+      // access cells. This is the real serialization point (a lane holds one
+      // robot for ~2 ticks), so it measures genuine station occupancy rather
+      // than robots merely en route. Capped at the lane count for safety.
+      const occupiedLanes = Math.min(
+        station.accessPositions.length,
+        this.state.robots.filter(
+          (robot) =>
+            robot.state === "droppingOff" &&
+            station.accessPositions.some((cell) =>
+              samePosition(robot.position, cell),
+            ),
+        ).length,
       );
-      if (station.active) {
-        station.busyTicks += 1;
+      station.active = occupiedLanes > 0;
+      station.busyTicks += occupiedLanes;
+    }
+    // Accumulate occupied-cage ticks for every elevator currently held, so the
+    // metrics layer can derive elevator utilization (the multi-level bottleneck).
+    for (const elevator of this.state.warehouse.elevatorZones) {
+      if (elevator.busy) {
+        elevator.busyTicks += 1;
       }
     }
   }

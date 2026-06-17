@@ -284,3 +284,52 @@ Definitions:
 Utilite: quantifier le compromis entre autonomie embarquee, poids batterie, chargeurs disponibles et interruption operationnelle. `depletionEvents` donne directement le seuil d'autonomie sur en tracant les pannes contre `maxBattery`.
 
 Affichage: panneau `Batterie et recharge` dans l'onglet Research, export CSV et rapports Markdown.
+
+## Attribution De Goulot (chaine de debit)
+
+Le debit d'un entrepot automatise est limite par le maillon le plus faible d'une
+chaine de ressources partagees, pas par la seule surface au sol. Le Lab mesure
+l'utilisation (ratio 0..1) de chaque maillon pour identifier *lequel* sature a un
+point de fonctionnement donne.
+
+Definitions:
+
+- `stationUtilization`: occupation cumulee des quais de picking. Chaque tick, on
+  compte les lanes (`accessPositions`) occupees par un robot en `droppingOff`, puis
+  on divise par `(ticks * total lanes)`. Capacite indicative ~1 drop / 2 ticks par
+  lane (~30 caisses/min/lane).
+- `elevatorUtilization`: `Sum(elevator.busyTicks) / (ticks * nb cages)`. Une cage ne
+  prend qu'un robot a la fois — c'est le goulot des layouts multi-niveaux.
+- `chargerUtilization`: `chargingTicks / (ticks * nb chargeurs)`.
+- `fleetUtilization`: part de robot-ticks *productifs* (deplacement/manipulation vers
+  des commandes), attente bloquee et recharge exclues. Distinct de
+  `averageRobotUtilization`, qui compte tout tick non-idle et reste proche de 100%.
+- `floorCongestion`: part de robot-ticks perdus en attente d'une cellule occupee
+  (`Sum(robot.waitingTicks) / (ticks * nb robots)`). Eleve = allees engorgees.
+- `stationQueueLength`: commandes en attente, cumulees sur toutes les stations.
+
+`bottleneck` (KPI « Goulot dominant », categoriel encode en code numerique) et
+`bottleneckShare` (intensite) sont derives par une cascade physique dans
+`classifyBottleneck` (`labKit.ts`):
+
+1. Demande satisfaite (`feasibilityMargin >= -0.02`) -> `demande`: ajouter des
+   ressources est inutile, le systeme suit la demande.
+2. Sinon une ressource serialisee (station/ascenseur/chargeur) au-dessus de
+   `SHARED_SATURATION` (0.85) -> cette ressource.
+3. Sinon congestion sol au-dessus de `FLOOR_GRIDLOCK` (0.20) -> `floor`.
+4. Sinon `fleet`: la flotte est simplement sous-dimensionnee (ajouter des robots).
+
+Note modele: avec le modele de collision a occupation de cellule (un robot par
+cellule, sans pathfinding multi-agent), concentrer tout le flux sur une station
+unique gridlocke les allees AVANT de saturer les quais — un goulot « station » se
+manifeste donc surtout comme `floor` (congestion), pas comme `stationUtilization`.
+
+Couplage demande/surface: quand un balayage fait varier `warehouseSize` sans fixer
+`ordersPerMinute`, la demande suit la surface (`DEMAND_PER_100_CELLS = 13` cmd/min
+par 100 cellules) pour que chaque taille soit chargee a proportion et que son point
+de saturation propre devienne visible. Un `ordersPerMinute` explicite l'emporte.
+
+Affichage: onglet `Goulot` du Lab — barres groupees d'utilisation par maillon (le
+plus haut = la contrainte, mis en relief), ligne de debit en surimpression, et bande
+de lecture du goulot dominant le long de l'axe X. Le template `Chaine de goulots`
+(stations x flotte) illustre le deplacement du goulot.

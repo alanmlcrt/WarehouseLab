@@ -68,6 +68,12 @@ export interface WarehouseSizePreset {
  *  capacity - it stops naturally when no valid positions remain. */
 export const RACK_FILL_SENTINEL = 9999;
 
+/** Demand-to-area coupling: orders/min per 100 floor cells, applied when a sweep
+ *  varies warehouseSize without pinning ordersPerMinute. Calibrated so M
+ *  (24×18 ≈ 432 cells) lands near the realistic ~55 orders/min. Keeps every size
+ *  comparably loaded so the size-dependent saturation point becomes visible. */
+export const DEMAND_PER_100_CELLS = 13;
+
 /** Max robots the engine allows on a given floor before clamping, to keep the
  *  grid from jamming. One robot per 4 cells. Shared by the engine clamp and the
  *  PlanEditor warning so the rule lives in one place. */
@@ -637,6 +643,14 @@ export const METRIC_COLUMNS: Array<{
   { id: "costProxy", label: "Coût (indicatif)", unit: "unités", essential: true, group: "Coût" },
   { id: "averageProcessingTime", label: "Temps moyen / commande", unit: "s", essential: true, group: "Performance" },
   { id: "averageRobotUtilization", label: "Occupation robots", unit: "ratio", essential: true, group: "Efficacité" },
+  { id: "stationUtilization", label: "Utilisation stations", unit: "ratio", group: "Efficacité" },
+  { id: "elevatorUtilization", label: "Utilisation ascenseurs", unit: "ratio", group: "Efficacité" },
+  { id: "chargerUtilization", label: "Utilisation chargeurs", unit: "ratio", group: "Efficacité" },
+  { id: "fleetUtilization", label: "Utilisation flotte", unit: "ratio", group: "Efficacité" },
+  { id: "floorCongestion", label: "Congestion sol", unit: "ratio", group: "Efficacité" },
+  { id: "bottleneck", label: "Goulot dominant", essential: true, group: "Performance" },
+  { id: "bottleneckShare", label: "Intensité du goulot", unit: "ratio", group: "Performance" },
+  { id: "stationQueueLength", label: "File stations", unit: "commandes" },
   { id: "averageDistancePerOrder", label: "Distance / commande", essential: true, group: "Efficacité" },
   { id: "totalDistance", label: "Distance totale" },
   { id: "completedOrders", label: "Caisses livrées" },
@@ -1026,6 +1040,7 @@ export function runSinglePoint(
   // Feasibility judged on the stationary regime, not the noisy 60 s snapshot.
   const feasibilityMargin =
     demand > 0 ? (steady.steadyThroughputPerMinute - demand) / demand : 0;
+  const bottleneck = classifyBottleneck(metrics, feasibilityMargin);
 
   return {
     id: `${label}-${seedIndex + 1}`,
@@ -1056,6 +1071,8 @@ export function runSinglePoint(
       backlogGrowthPerMinute: steady.backlogGrowthPerMinute,
       demandPerMinute: demand,
       feasibilityMargin,
+      bottleneck: bottleneckCode(bottleneck.link),
+      bottleneckShare: bottleneck.share,
     },
     feasible: steady.steadyThroughputPerMinute >= demand * 0.98,
     physicalSnapshot: capturePhysicalSnapshot(snapshot),
@@ -1150,6 +1167,18 @@ function applyCombination(
   // the fill sentinel is applied (also handles the case where no topology was set).
   if (setFactorIds.has("warehouseSize") && !setFactorIds.has("rackCount")) {
     config.warehouse.rackCount = RACK_FILL_SENTINEL;
+  }
+
+  // Couple demand to floor area (constant flow density) when sweeping
+  // warehouseSize without an explicit ordersPerMinute. Otherwise every size
+  // shares one fixed demand and they all plateau at the same ceiling — masking
+  // the size-dependent saturation. An explicit ordersPerMinute override wins,
+  // mirroring the rackCount sentinel philosophy above.
+  if (setFactorIds.has("warehouseSize") && !setFactorIds.has("ordersPerMinute")) {
+    const area = config.warehouse.width * config.warehouse.height;
+    config.demand.ordersPerMinute = Math.round(
+      (DEMAND_PER_100_CELLS * area) / 100,
+    );
   }
 
   // Battery weight is derived from autonomy; it is not a user-controlled factor.
@@ -1347,7 +1376,96 @@ function flattenMetrics(
     verticalPressure: metrics.verticalPressure,
     activeRobots: metrics.activeRobots,
     demandPerMinute: demand,
+    stationUtilization: metrics.stationUtilization,
+    elevatorUtilization: metrics.elevatorUtilization,
+    chargerUtilization: metrics.chargerUtilization,
+    fleetUtilization: metrics.fleetUtilization,
+    floorCongestion: metrics.floorCongestion,
+    stationQueueLength: metrics.stationQueueLength,
   };
+}
+
+/** Bottleneck links, ordered to match the throughput chain. Shared by the
+ *  classifier below and the dedicated "Goulot" view. */
+export const BOTTLENECK_LINKS = [
+  "station",
+  "elevator",
+  "charger",
+  "floor",
+  "fleet",
+] as const;
+
+export type BottleneckLink = (typeof BOTTLENECK_LINKS)[number] | "demande";
+
+export const BOTTLENECK_LABELS: Record<BottleneckLink, string> = {
+  demande: "Demande",
+  station: "Stations",
+  elevator: "Ascenseurs",
+  charger: "Chargeurs",
+  floor: "Congestion sol",
+  fleet: "Flotte",
+};
+
+/** A serialized shared resource this busy is effectively the wall. */
+export const SHARED_SATURATION = 0.85;
+/** This much robot-time lost to blocked moves means the aisles are gridlocked. */
+export const FLOOR_GRIDLOCK = 0.2;
+
+/** Attribute the binding constraint at one operating point, as a physical
+ *  cascade rather than a naive argmax (the links live on different scales — a
+ *  serialized cage at 90 % occupancy and aisles losing 30 % of robot-time are
+ *  both "the wall" but at very different numbers):
+ *
+ *  1. Demand met (feasibilityMargin ≳ 0)         → "demande": adding anything is moot.
+ *  2. A shared resource (station/elevator/charger)
+ *     pegged near saturation                      → that resource.
+ *  3. Aisles losing a large share of robot-time   → "floor" (congestion gridlock).
+ *  4. Otherwise the fleet is simply too small     → "fleet" (add robots).
+ */
+export function classifyBottleneck(
+  metrics: Record<string, number>,
+  feasibilityMargin: number,
+): { link: BottleneckLink; share: number } {
+  const station = metrics.stationUtilization ?? 0;
+  const elevator = metrics.elevatorUtilization ?? 0;
+  const charger = metrics.chargerUtilization ?? 0;
+  const floor = metrics.floorCongestion ?? 0;
+  const fleet = metrics.fleetUtilization ?? 0;
+
+  if (feasibilityMargin >= -0.02) {
+    return { link: "demande", share: Math.max(station, elevator, charger) };
+  }
+
+  const sharedLinks: Array<[(typeof BOTTLENECK_LINKS)[number], number]> = [
+    ["station", station],
+    ["elevator", elevator],
+    ["charger", charger],
+  ];
+  const [topShared, topSharedShare] = sharedLinks.reduce((best, cur) =>
+    cur[1] > best[1] ? cur : best,
+  );
+  if (topSharedShare >= SHARED_SATURATION) {
+    return { link: topShared, share: topSharedShare };
+  }
+  if (floor >= FLOOR_GRIDLOCK) {
+    return { link: "floor", share: floor };
+  }
+  return { link: "fleet", share: fleet };
+}
+
+/** Numeric code for the categorical `bottleneck` metric so it flows through the
+ *  number-keyed RunPoint.metrics map. Index into BOTTLENECK_LABELS order. */
+export const BOTTLENECK_CODES: BottleneckLink[] = [
+  "demande",
+  ...BOTTLENECK_LINKS,
+];
+
+export function bottleneckCode(link: BottleneckLink): number {
+  return Math.max(0, BOTTLENECK_CODES.indexOf(link));
+}
+
+export function bottleneckFromCode(code: number): BottleneckLink {
+  return BOTTLENECK_CODES[Math.round(code)] ?? "demande";
 }
 
 function buildLabel(combination: CombinationEntry[], seedIndex: number): string {
@@ -1686,6 +1804,38 @@ export const EXPERIMENT_TEMPLATES: ExperimentTemplate[] = [
       { factorId: "demandPattern", values: ["abc"] },
       // Régime stationnaire (pas de pic) : on lit une vraie capacité soutenue.
       { factorId: "peakProfile", values: ["none"] },
+      { factorId: "chargingStationCount", values: [8] },
+      { factorId: "storageStrategy", values: ["abcStorage"] },
+      { factorId: "pathfindingStrategy", values: ["reservation"] },
+      { factorId: "reroutingPolicy", values: ["reactive"] },
+    ],
+  },
+  {
+    id: "bottleneck_chain",
+    title: "Chaîne de goulots (stations × flotte)",
+    hypothesis:
+      "Le débit = le maillon le plus faible, et le maillon change avec la flotte ET le nombre de stations. À bas effectif le système est limité par la flotte (ajouter des robots paie). Avec 1 seule station, concentrer tout le flux sur un point crée un embouteillage : au-delà d'un certain effectif le débit s'EFFONDRE (congestion sol). Répartir sur 3 stations supprime ce collapse et laisse la flotte continuer à monter. La vue Goulot doit montrer l'attribution passer de « Flotte » à « Congestion sol » avec 1 station, et rester « Flotte » plus longtemps avec 3.",
+    icon: "⛓️",
+    seedCount: 12,
+    simulatedMinutes: 5,
+    warmupMinutes: 2,
+    // Deux facteurs croisés : flotte (axe X de la vue Goulot) × nombre de stations
+    // (la ressource qu'on desserre pour faire bouger le goulot d'un maillon à l'autre).
+    variableFactors: [
+      { factorId: "robotCount", values: [8, 16, 24, 32, 40, 48] },
+      { factorId: "pickingStationCount", values: [1, 2, 3] },
+    ],
+    contextFactors: [
+      // Entrepôt réaliste : M, 6 niveaux. La demande est forte (supply-limited)
+      // pour que le système soit poussé sur ses ressources internes, pas freiné
+      // par le carnet de commandes — sinon le goulot serait "demande" partout.
+      { factorId: "warehouseSize", values: ["m"] },
+      { factorId: "levelCount", values: [6] },
+      { factorId: "ordersPerMinute", values: [55] },
+      { factorId: "demandPattern", values: ["abc"] },
+      { factorId: "peakProfile", values: ["none"] },
+      // Chargeurs généreux : la batterie n'est jamais le goulot, on isole
+      // stations / ascenseurs / congestion.
       { factorId: "chargingStationCount", values: [8] },
       { factorId: "storageStrategy", values: ["abcStorage"] },
       { factorId: "pathfindingStrategy", values: ["reservation"] },

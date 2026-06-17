@@ -471,6 +471,7 @@ function createElevatorZones(
     queueLength: 0,
     tripsCompleted: 0,
     busy: false,
+    busyTicks: 0,
   }));
 }
 
