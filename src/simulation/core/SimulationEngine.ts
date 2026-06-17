@@ -4,6 +4,7 @@ import { buildWarehouse } from "./warehouseFactory";
 import {
   buildBlockedCellSet,
   buildCellMap,
+  cellIndexKey,
   getNeighbors,
   inBounds,
   manhattanDistance,
@@ -41,9 +42,11 @@ export class SimulationEngine {
   private demandRng: SeededRandom;
   private batteryRng: SeededRandom;
   private failureRng: SeededRandom;
-  private blockedCells: Set<string>;
-  private cellMap: Map<string, number>;
+  private blockedCells: Set<number>;
+  private cellMap: Map<number, number>;
   private connectorCellMap: Map<string, number[]>;
+  /** Grid height, cached for the integer cell-key formula (x * height + y). */
+  private gridHeight = 1;
   /** Space-time reservation table (cooperative, priority-based) used when
    *  temporal reservation is active. Keys encode either a cell slot
    *  `"<offset>:<level>:<posKey>"` or an undirected edge slot
@@ -62,6 +65,11 @@ export class SimulationEngine {
    *  evasive side-step that breaks head-on deadlocks in 1-wide aisles, where
    *  the reservation layer correctly forbids the swap but no one ever yields. */
   private stuckTicks = new Map<string, number>();
+  /** O(1) lookups by id, kept in sync with state.orders / state.tasks so the
+   *  per-tick `findAssignedOrder` / task lookups don't linear-scan the arrays
+   *  (which grow with the backlog and task history). */
+  private ordersById = new Map<string, Order>();
+  private tasksById = new Map<string, Task>();
   private orderAccumulator = 0;
   private orderCounter = 1;
   private taskCounter = 1;
@@ -96,6 +104,7 @@ export class SimulationEngine {
       this.stationRng,
       this.skuCatalogRng,
     );
+    this.gridHeight = warehouse.height;
     this.blockedCells = buildBlockedCellSet(warehouse);
     this.cellMap = buildCellMap(warehouse);
     this.connectorCellMap = buildConnectorCellMap(warehouse);
@@ -199,7 +208,7 @@ export class SimulationEngine {
 
     const blocked = buildBlockedCellSet(warehouse);
     return warehouse.cells
-      .filter((cell) => !blocked.has(positionKey(cell)))
+      .filter((cell) => !blocked.has(cellIndexKey(cell.x, cell.y, warehouse.height)))
       .map((cell) => ({ x: cell.x, y: cell.y }));
   }
 
@@ -212,15 +221,15 @@ export class SimulationEngine {
       (crateOrdersPerMinute * this.state.config.tickDurationSeconds) / 60;
 
     while (this.orderAccumulator >= 1) {
-      this.state.orders.push(
-        createOrder(
-          this.orderCounter,
-          this.state.warehouse,
-          this.state.config.demand,
-          this.state.elapsedSeconds,
-          this.demandRng,
-        ),
+      const order = createOrder(
+        this.orderCounter,
+        this.state.warehouse,
+        this.state.config.demand,
+        this.state.elapsedSeconds,
+        this.demandRng,
       );
+      this.state.orders.push(order);
+      this.ordersById.set(order.id, order);
       this.orderCounter += 1;
       this.orderAccumulator -= 1;
     }
@@ -270,6 +279,7 @@ export class SimulationEngine {
       };
       this.taskCounter += 1;
       this.state.tasks.push(task);
+      this.tasksById.set(task.id, task);
 
       order.status = "assigned";
       order.assignedAt = this.state.elapsedSeconds;
@@ -456,9 +466,9 @@ export class SimulationEngine {
           order.rackId = undefined;
           order.storageLocationId = undefined;
         }
-        const task = this.state.tasks.find(
-          (candidate) => candidate.id === robot.currentTaskId,
-        );
+        const task = robot.currentTaskId
+          ? this.tasksById.get(robot.currentTaskId)
+          : undefined;
         if (task) {
           task.status = "failed";
           task.completedAt = this.state.elapsedSeconds;
@@ -582,7 +592,7 @@ export class SimulationEngine {
 
     const nextKey = this.positionLevelKey(next, robot.level);
     const isElevatorLane = this.isElevatorPosition(next);
-    const blockedByLayout = this.blockedCells.has(positionKey(next));
+    const blockedByLayout = this.blockedCells.has(this.cellKey(next));
     let blocked: boolean;
     if (reservationActive && !isElevatorLane) {
       // Trust the reservation layer instead of the instantaneous `occupied`
@@ -663,7 +673,7 @@ export class SimulationEngine {
       this.state.warehouse.width,
       this.state.warehouse.height,
     ).filter((cell) => {
-      if (this.blockedCells.has(positionKey(cell))) return false;
+      if (this.blockedCells.has(this.cellKey(cell))) return false;
       // Elevator lanes are a shared single-capacity resource — never squat one
       // as a parking spot.
       if (this.isElevatorPosition(cell)) return false;
@@ -810,6 +820,7 @@ export class SimulationEngine {
     order.completedAt = this.state.elapsedSeconds;
     this.state.completedOrders.push({ ...order });
     this.state.orders = this.state.orders.filter((candidate) => candidate.id !== order.id);
+    this.ordersById.delete(order.id);
 
     const station = this.state.warehouse.pickingStations.find(
       (candidate) => candidate.id === order.stationId,
@@ -820,7 +831,9 @@ export class SimulationEngine {
       station.busyTicks += 1;
     }
 
-    const task = this.state.tasks.find((candidate) => candidate.id === robot.currentTaskId);
+    const task = robot.currentTaskId
+      ? this.tasksById.get(robot.currentTaskId)
+      : undefined;
     if (task) {
       task.status = "completed";
       task.completedAt = this.state.elapsedSeconds;
@@ -918,7 +931,9 @@ export class SimulationEngine {
   }
 
   private findAssignedOrder(robot: Robot): Order | undefined {
-    return this.state.orders.find((order) => order.id === robot.assignedOrderId);
+    return robot.assignedOrderId
+      ? this.ordersById.get(robot.assignedOrderId)
+      : undefined;
   }
 
   private assignChargingTasks(): void {
@@ -1032,7 +1047,7 @@ export class SimulationEngine {
    *  spreads the fleet across lanes. An A/B test confirmed that ignoring moving
    *  robots collapses throughput (~3x worse) and raises congestion, because
    *  robots then plan colliding paths the reservation layer must stall. */
-  private getOccupiedCells(exceptRobotId?: string, level = 0): Set<string> {
+  private getOccupiedCells(exceptRobotId?: string, level = 0): Set<number> {
     return new Set(
       this.state.robots
         .filter(
@@ -1041,7 +1056,7 @@ export class SimulationEngine {
             robot.level === level &&
             !this.isElevatorPosition(robot.position),
         )
-        .map((robot) => positionKey(robot.position)),
+        .map((robot) => this.cellKey(robot.position)),
     );
   }
 
@@ -1275,9 +1290,9 @@ export class SimulationEngine {
       order.rackId = undefined;
       order.storageLocationId = undefined;
     }
-    const task = this.state.tasks.find(
-      (candidate) => candidate.id === robot.currentTaskId,
-    );
+    const task = robot.currentTaskId
+      ? this.tasksById.get(robot.currentTaskId)
+      : undefined;
     if (task) {
       task.status = "failed";
       task.completedAt = this.state.elapsedSeconds;
@@ -1314,13 +1329,19 @@ export class SimulationEngine {
     return `${level}:${positionKey(position)}`;
   }
 
+  /** Integer cell key for the occupancy / blocked / cellMap structures consumed
+   *  by pathfinding. Matches cellIndexKey; kept as a method for the hot path. */
+  private cellKey(position: GridPosition): number {
+    return cellIndexKey(position.x, position.y, this.gridHeight);
+  }
+
   private isElevatorPosition(position: GridPosition): boolean {
-    const index = this.cellMap.get(positionKey(position));
+    const index = this.cellMap.get(this.cellKey(position));
     return index !== undefined && this.state.warehouse.cells[index].type === "elevator";
   }
 
   private incrementCellTraffic(position: GridPosition, level: number): void {
-    const index = this.cellMap.get(positionKey(position));
+    const index = this.cellMap.get(this.cellKey(position));
     if (index === undefined) {
       return;
     }
@@ -1342,7 +1363,7 @@ export class SimulationEngine {
   }
 
   private incrementCellWait(position: GridPosition, level: number): void {
-    const index = this.cellMap.get(positionKey(position));
+    const index = this.cellMap.get(this.cellKey(position));
     if (index === undefined) {
       return;
     }
@@ -1544,7 +1565,13 @@ function deterministicJitter(seed: number, key: string): number {
   for (let index = 0; index < key.length; index += 1) {
     hash = Math.imul(hash ^ key.charCodeAt(index), 16777619) >>> 0;
   }
-  return createSeededRandom(hash).next() * 0.001;
+  // Inlined createSeededRandom(hash).next() — produces byte-identical values
+  // without allocating an RNG object on every sort comparison (this runs in the
+  // hot comparator of several per-tick sorts).
+  let value = (hash >>> 0) + 0x6d2b79f5;
+  value = Math.imul(value ^ (value >>> 15), value | 1);
+  value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+  return (((value ^ (value >>> 14)) >>> 0) / 4294967296) * 0.001;
 }
 
 function buildConnectorCellMap(warehouse: Warehouse): Map<string, number[]> {

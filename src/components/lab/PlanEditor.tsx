@@ -27,7 +27,7 @@ import {
   getFactorById,
   isRequiredFactor,
   maxRobotsForArea,
-  type ConfoundRule,
+  type ConfoundWarning,
   type FactorDef,
   type FactorRole,
   type FactorValue,
@@ -126,6 +126,7 @@ export function PlanEditor({
 }: PlanEditorProps) {
   const [helpFactorId, setHelpFactorId] = useState<string | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [templateId, setTemplateId] = useState(EXPERIMENT_TEMPLATES[0]?.id ?? "");
 
   // Confound locks + required-factor invariant: applied after every mutation so
   // the UI cannot end up with a varied confounder or a required factor that
@@ -175,6 +176,12 @@ export function PlanEditor({
   );
 
   const totalRuns = useMemo(() => countPlanRuns(plan), [plan]);
+  const selectedTemplate = useMemo(
+    () =>
+      EXPERIMENT_TEMPLATES.find((template) => template.id === templateId) ??
+      EXPERIMENT_TEMPLATES[0],
+    [templateId],
+  );
   const bindingsById = useMemo(
     () => new Map(plan.bindings.map((binding) => [binding.factorId, binding])),
     [plan],
@@ -412,44 +419,46 @@ export function PlanEditor({
             {error}
           </div>
         ) : null}
-        {lockedFactors.size > 0 ? (
-          <LockBanner lockedFactors={lockedFactors} />
-        ) : null}
-        {robotClampWarning ? (
-          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 lg:col-span-2">
-            <span className="mr-1 text-amber-700">⚠</span>
-            <span className="font-semibold">Densité robots plafonnée :</span> sur l'entrepôt{" "}
-            <span className="font-medium">{robotClampWarning.size}</span>, le moteur limite à{" "}
-            <span className="font-medium tabular-nums">{robotClampWarning.cap}</span> robots
-            (1 pour 4 cellules). Tes valeurs au-dessus de {robotClampWarning.cap} seront
-            ramenées à ce plafond — elles apparaîtront fusionnées dans les résultats.
-          </div>
+        {lockedFactors.size > 0 || robotClampWarning ? (
+          <RunAdvisoryPanel
+            lockedFactors={lockedFactors}
+            robotClampWarning={robotClampWarning}
+          />
         ) : null}
       </div>
       {/* Template picker ------------------------------------------------ */}
-      <div className="rounded-lg border border-line bg-white p-3 shadow-sm">
-        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-          Cas types — charger un plan préconfigurné
-        </div>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {EXPERIMENT_TEMPLATES.map((tpl) => (
-            <button
-              key={tpl.id}
-              className="flex flex-col gap-1 rounded-md border border-line bg-slate-50 p-2 text-left transition-colors hover:border-accent hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={isRunning}
-              onClick={() => onChange(buildPlanFromTemplate(tpl))}
-              type="button"
-              title={tpl.hypothesis}
-            >
-              <span className="text-base leading-none">{tpl.icon}</span>
-              <span className="text-xs font-semibold leading-tight text-ink">
+      <div className="flex flex-col gap-2 rounded-lg border border-line bg-white px-3 py-2 shadow-sm sm:flex-row sm:items-center">
+        <label
+          className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-slate-400"
+          htmlFor="lab-template-picker"
+        >
+          Cas type
+        </label>
+        <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row">
+          <select
+            className="h-9 min-w-0 flex-1 rounded-md border border-line bg-slate-50 px-2 text-sm font-semibold text-ink"
+            disabled={isRunning}
+            id="lab-template-picker"
+            onChange={(event) => setTemplateId(event.target.value)}
+            value={selectedTemplate?.id ?? ""}
+          >
+            {EXPERIMENT_TEMPLATES.map((tpl) => (
+              <option key={tpl.id} value={tpl.id}>
                 {tpl.title}
-              </span>
-              <span className="text-[11px] leading-tight text-slate-500">
-                {tpl.hypothesis}
-              </span>
-            </button>
-          ))}
+              </option>
+            ))}
+          </select>
+          <button
+            className="h-9 rounded-md bg-ink px-3 text-sm font-semibold text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={isRunning || !selectedTemplate}
+            onClick={() => {
+              if (selectedTemplate) onChange(buildPlanFromTemplate(selectedTemplate));
+            }}
+            title={selectedTemplate?.hypothesis}
+            type="button"
+          >
+            Charger
+          </button>
         </div>
       </div>
       {/* Drag board ----------------------------------------------------- */}
@@ -710,7 +719,7 @@ function FactorCard({
   zone: Exclude<Zone, "shelf">;
   values: FactorValue[];
   dragging: boolean;
-  lock: { rule: ConfoundRule; triggerLabel: string } | null;
+  lock: ConfoundWarning[] | null;
   onHelp: () => void;
   onSetValues: (values: FactorValue[]) => void;
   onMove: (zone: Zone) => void;
@@ -718,7 +727,9 @@ function FactorCard({
   const { attributes, listeners, setNodeRef } = useDraggable({ id: factor.id });
   const hasHelp = hasFactorHelp(factor.id);
   const warningTitle = lock
-    ? `Risque de confond : ${lock.triggerLabel} varie déjà. ${lock.rule.why}`
+    ? lock
+        .map((warning) => `${warning.triggerLabel} varie aussi. ${warning.rule.why}`)
+        .join("\n")
     : undefined;
 
   return (
@@ -728,7 +739,7 @@ function FactorCard({
         dragging
           ? "opacity-40"
           : lock
-            ? "border-amber-300 bg-amber-50/40"
+            ? "border-amber-200 bg-amber-50/20"
             : zone === "variable"
               ? "border-accent/30 bg-accent/[0.03]"
               : "border-line bg-white"
@@ -752,10 +763,11 @@ function FactorCard({
         </span>
         {lock ? (
           <span
-            className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700"
+            className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-amber-700"
             title={warningTitle}
           >
-            ⚠ confond ?
+            <WarningIcon />
+            Effet mêlé
           </span>
         ) : null}
         {hasHelp ? (
@@ -1268,47 +1280,109 @@ function LockIcon() {
   );
 }
 
-function LockBanner({
+function RunAdvisoryPanel({
   lockedFactors,
+  robotClampWarning,
 }: {
-  lockedFactors: Map<string, { rule: ConfoundRule; triggerLabel: string }>;
+  lockedFactors: Map<string, ConfoundWarning[]>;
+  robotClampWarning: { cap: number; size: string; requested: number } | null;
 }) {
-  // Soft warning: group flagged factors by the trigger rule so we display one
-  // row per study. Behaviour is purely advisory — nothing is forced.
-  const byTrigger = new Map<string, { triggerLabel: string; why: string; locked: string[] }>();
-  for (const [factorId, info] of lockedFactors) {
-    const entry = byTrigger.get(info.rule.trigger);
-    const label = getFactorById(factorId)?.label ?? factorId;
-    if (entry) {
-      entry.locked.push(label);
-    } else {
-      byTrigger.set(info.rule.trigger, {
-        triggerLabel: info.triggerLabel,
-        why: info.rule.why,
-        locked: [label],
-      });
+  // Soft warning: group flagged factors into unique relationships. Rules are
+  // symmetric, but the banner should show "A x B" once, not once per direction.
+  const relationships = new Map<
+    string,
+    { triggerLabel: string; linkedLabel: string; why: string }
+  >();
+  for (const [factorId, warnings] of lockedFactors) {
+    for (const info of warnings) {
+      const pairKey = [info.rule.trigger, factorId].sort().join("::");
+      if (!relationships.has(pairKey)) {
+        relationships.set(pairKey, {
+          triggerLabel: info.triggerLabel,
+          linkedLabel: getFactorById(factorId)?.label ?? factorId,
+          why: info.rule.why,
+        });
+      }
     }
   }
+  const confoundEntries = [...relationships.values()];
+  const noticeCount = (confoundEntries.length > 0 ? 1 : 0) + (robotClampWarning ? 1 : 0);
+
   return (
-    <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 lg:col-span-2">
-      <div className="flex items-start gap-2">
-        <span className="mt-0.5 text-amber-700">⚠</span>
-        <div className="flex flex-col gap-1">
-          <div className="font-semibold">
-            Risque de confond — possible mais l'attribution sera plus difficile :
-          </div>
-          {[...byTrigger.values()].map((entry, i) => (
-            <div key={i}>
-              <span className="font-semibold">{entry.triggerLabel}</span> varie déjà ; faire varier en plus
-              {" "}
-              <span className="font-medium">{entry.locked.join(", ")}</span>
-              {" "}mélange les effets. <span className="text-amber-700">{entry.why}</span>
-              {" "}<span className="italic text-amber-600">Pour une étude d'interaction volontaire, ignore.</span>
-            </div>
-          ))}
-        </div>
+    <section className="rounded-md border border-amber-200 bg-amber-50/45 px-3 py-2 text-xs text-amber-900 lg:col-span-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+          <WarningIcon />
+        </span>
+        <span className="font-semibold">À vérifier</span>
+        <span className="text-amber-800">
+          {noticeCount} point{noticeCount > 1 ? "s" : ""} avant lancement.
+        </span>
+        {confoundEntries.length > 0 ? (
+          <span className="rounded-full bg-white px-2 py-0.5 font-medium text-amber-800">
+            Liens mêlés : {confoundEntries.length}
+          </span>
+        ) : null}
+        {robotClampWarning ? (
+          <span className="rounded-full bg-white px-2 py-0.5 font-medium text-amber-800">
+            Robots plafonnés à {robotClampWarning.cap}
+          </span>
+        ) : null}
       </div>
-    </div>
+      <details className="mt-1.5">
+        <summary className="cursor-pointer text-[11px] font-semibold text-amber-700 hover:text-amber-900">
+          Voir le détail
+        </summary>
+        <div className="mt-2 grid gap-2 md:grid-cols-2">
+          {confoundEntries.length > 0 ? (
+            <div className="rounded border border-amber-200 bg-white/70 p-2">
+              <div className="font-semibold">Attribution plus difficile</div>
+              <div className="mt-1 space-y-1 text-amber-800">
+                {confoundEntries.map((entry, i) => (
+                  <div key={i}>
+                    <span className="font-medium">{entry.triggerLabel}</span>
+                    {" × "}
+                    <span className="font-medium">{entry.linkedLabel}</span>
+                    {" "}varient ensemble. {entry.why}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {robotClampWarning ? (
+            <div className="rounded border border-amber-200 bg-white/70 p-2">
+              <div className="font-semibold">Densité robots plafonnée</div>
+              <div className="mt-1 text-amber-800">
+                Sur l'entrepôt {robotClampWarning.size}, le moteur limite à{" "}
+                <span className="font-medium tabular-nums">{robotClampWarning.cap}</span>{" "}
+                robots. Les valeurs au-dessus seront ramenées au plafond et fusionnées
+                dans les résultats.
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function WarningIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.7"
+      aria-hidden="true"
+    >
+      <path d="M8 2 1.8 13h12.4L8 2Z" />
+      <path d="M8 6v3.2" />
+      <path d="M8 12h.01" />
+    </svg>
   );
 }
 

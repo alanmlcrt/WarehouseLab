@@ -48,6 +48,8 @@ export const METRIC_HELP: Record<string, string> = {
     "Débit instantané mesuré sur la dernière minute simulée. Plus bruité que le débit principal ; utile surtout pour voir les à-coups.",
   steadyBacklog:
     "Nombre moyen de commandes en attente une fois le régime stable atteint. Plus c'est bas, mieux c'est.",
+  backlogGrowthPerMinute:
+    "Croissance du backlog en régime stable, en commandes par minute. Autour de 0 = file stable ; positif = la demande arrive plus vite que le système ne livre ; négatif = la file se résorbe.",
   serviceLevel:
     "Taux de service : part des commandes créées qui ont effectivement été livrées avant la fin du run.",
   throughputPerRobot:

@@ -6,6 +6,7 @@ import {
 } from "../../experiments/labKit";
 import { correlationMatrix } from "../../experiments/labStats";
 import { getVaryingFactors } from "./analysis";
+import { Verdict } from "./Verdict";
 
 interface CorrelationHeatmapProps {
   points: RunPoint[];
@@ -53,6 +54,21 @@ export function CorrelationHeatmap({ points }: CorrelationHeatmapProps) {
 
   const [hover, setHover] = useState<{ row: number; col: number } | null>(null);
 
+  // Strongest relationship in the matrix (largest |r| off the diagonal), stated
+  // in plain words so a reader doesn't have to scan the whole grid.
+  const strongest = useMemo(() => {
+    let best: { a: string; b: string; r: number } | null = null;
+    for (let i = 0; i < validSeries.length; i += 1) {
+      for (let j = i + 1; j < validSeries.length; j += 1) {
+        const r = matrix[i]?.[j] ?? 0;
+        if (!best || Math.abs(r) > Math.abs(best.r)) {
+          best = { a: validSeries[i].label, b: validSeries[j].label, r };
+        }
+      }
+    }
+    return best;
+  }, [matrix, validSeries]);
+
   if (points.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-xs text-slate-400">
@@ -63,6 +79,17 @@ export function CorrelationHeatmap({ points }: CorrelationHeatmapProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
+      {strongest && Math.abs(strongest.r) >= 0.3 ? (
+        <Verdict>
+          Relation la plus forte : <b className="text-ink">{strongest.a}</b> et{" "}
+          <b className="text-ink">{strongest.b}</b>{" "}
+          {strongest.r >= 0 ? "augmentent ensemble" : "évoluent en sens opposé"}{" "}
+          <span className="text-slate-400">
+            (r = {strongest.r.toFixed(2)}, {Math.abs(strongest.r) >= 0.7 ? "lien fort" : "lien modéré"})
+          </span>
+          . Une corrélation n'est pas une cause : c'est une piste à confirmer.
+        </Verdict>
+      ) : null}
       <div className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-white p-2 text-xs text-slate-500">
         <span>
           Corrélations entre les paramètres testés et les métriques du test.

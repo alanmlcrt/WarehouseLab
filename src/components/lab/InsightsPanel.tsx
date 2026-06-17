@@ -5,7 +5,9 @@ import {
   type RunPoint,
 } from "../../experiments/labKit";
 import { summarizeReplicates } from "../../experiments/labStats";
+import { labelForFactor } from "./analysis";
 import { MetricSelect } from "./metrics";
+import { Verdict } from "./Verdict";
 
 interface InsightsPanelProps {
   points: RunPoint[];
@@ -44,6 +46,8 @@ export function InsightsPanel({ points }: InsightsPanelProps) {
       ? replicated.reduce((worst, entry) => (entry.cv > worst.cv ? entry : worst)).key
       : null;
   const maxCv = summaries.reduce((max, entry) => Math.max(max, entry.cv), 0);
+  const mostRobust = summaries.find((entry) => entry.key === mostRobustKey) ?? null;
+  const leastRobust = summaries.find((entry) => entry.key === leastRobustKey) ?? null;
 
   if (points.length === 0) {
     return <Centered>Lance un test pour mesurer la fiabilité des résultats.</Centered>;
@@ -51,6 +55,15 @@ export function InsightsPanel({ points }: InsightsPanelProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
+      {mostRobust && leastRobust && mostRobust.key !== leastRobust.key ? (
+        <Verdict>
+          Résultat le plus <b className="text-emerald-700">fiable</b> :{" "}
+          <b className="text-ink">{mostRobust.label}</b> (±{(mostRobust.cv * 100).toFixed(0)}% d'un essai à l'autre).
+          Le plus <b className="text-amber-700">fragile</b> :{" "}
+          <b className="text-ink">{leastRobust.label}</b> (±{(leastRobust.cv * 100).toFixed(0)}%) —
+          son résultat dépend beaucoup du tirage aléatoire, à confirmer sur plus de seeds.
+        </Verdict>
+      ) : null}
       <div className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-white p-3 shadow-sm">
         <MetricSelect metrics={activeMetrics} onChange={setMetricId} value={metricId} />
         <span className="text-xs text-slate-500">
@@ -134,7 +147,7 @@ function combinationLabel(point: RunPoint): string {
   if (entries.length === 0) {
     return "base";
   }
-  return entries.map(([key, value]) => `${key}=${value}`).join(" · ");
+  return entries.map(([key, value]) => `${labelForFactor(key)} = ${value}`).join(" · ");
 }
 
 function fmt(value: number): string {

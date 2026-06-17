@@ -2,9 +2,9 @@ import type { GridPosition, Warehouse } from "../models/types";
 import {
   buildBlockedCellSet,
   buildCellMap,
+  cellIndexKey,
   getNeighbors,
   manhattanDistance,
-  positionKey,
   samePosition,
 } from "../../utils/grid";
 
@@ -12,9 +12,9 @@ export type PathfindingAlgorithm = "manhattan" | "astar" | "dijkstra";
 
 export interface PathfindingOptions {
   warehouse: Warehouse;
-  occupied?: Set<string>;
-  blocked?: Set<string>;
-  cellMap?: Map<string, number>;
+  occupied?: Set<number>;
+  blocked?: Set<number>;
+  cellMap?: Map<number, number>;
   trafficWeight?: number;
   waitWeight?: number;
 }
@@ -28,19 +28,22 @@ export function findManhattanPath(
     return [];
   }
 
+  const height = options.warehouse.height;
   const blocked = options.blocked ?? buildBlockedCellSet(options.warehouse);
-  const occupied = options.occupied ?? new Set<string>();
+  const occupied = options.occupied ?? new Set<number>();
+  const startKey = cellIndexKey(start.x, start.y, height);
   const queue: GridPosition[] = [start];
-  const visited = new Set<string>([positionKey(start)]);
-  const parent = new Map<string, string>();
-  const positions = new Map<string, GridPosition>([[positionKey(start), start]]);
-  const targetKey = positionKey(target);
+  const visited = new Set<number>([startKey]);
+  const parent = new Map<number, number>();
+  const positions = new Map<number, GridPosition>([[startKey, start]]);
+  const targetKey = cellIndexKey(target.x, target.y, height);
 
   while (queue.length > 0) {
     const current = queue.shift();
     if (!current) {
       break;
     }
+    const currentKey = cellIndexKey(current.x, current.y, height);
 
     const neighbors = getNeighbors(
       current,
@@ -51,7 +54,7 @@ export function findManhattanPath(
     );
 
     for (const neighbor of neighbors) {
-      const key = positionKey(neighbor);
+      const key = cellIndexKey(neighbor.x, neighbor.y, height);
       const isTarget = key === targetKey;
 
       if (visited.has(key)) {
@@ -63,11 +66,11 @@ export function findManhattanPath(
       }
 
       visited.add(key);
-      parent.set(key, positionKey(current));
+      parent.set(key, currentKey);
       positions.set(key, neighbor);
 
       if (isTarget) {
-        return reconstructPath(parent, positions, positionKey(start), targetKey);
+        return reconstructPath(parent, positions, startKey, targetKey);
       }
 
       queue.push(neighbor);
@@ -87,19 +90,20 @@ export function findWeightedPath(
     return [];
   }
 
+  const height = options.warehouse.height;
   const blocked = options.blocked ?? buildBlockedCellSet(options.warehouse);
-  const occupied = options.occupied ?? new Set<string>();
+  const occupied = options.occupied ?? new Set<number>();
   const cellMap = options.cellMap ?? buildCellMap(options.warehouse);
   const trafficWeight = options.trafficWeight ?? 0.04;
   const waitWeight = options.waitWeight ?? 0.12;
   const useHeuristic = algorithm === "astar";
 
-  const startKey = positionKey(start);
-  const targetKey = positionKey(target);
-  const gScore = new Map<string, number>([[startKey, 0]]);
-  const parent = new Map<string, string>();
-  const positions = new Map<string, GridPosition>([[startKey, start]]);
-  const open = new MinHeap<{ key: string; position: GridPosition; f: number }>(
+  const startKey = cellIndexKey(start.x, start.y, height);
+  const targetKey = cellIndexKey(target.x, target.y, height);
+  const gScore = new Map<number, number>([[startKey, 0]]);
+  const parent = new Map<number, number>();
+  const positions = new Map<number, GridPosition>([[startKey, start]]);
+  const open = new MinHeap<{ key: number; position: GridPosition; f: number }>(
     (a, b) => a.f - b.f,
   );
 
@@ -121,7 +125,7 @@ export function findWeightedPath(
     );
 
     for (const neighbor of neighbors) {
-      const key = positionKey(neighbor);
+      const key = cellIndexKey(neighbor.x, neighbor.y, height);
       const isTarget = key === targetKey;
 
       if (!isTarget && (blocked.has(key) || occupied.has(key))) {
@@ -164,10 +168,10 @@ export function findPath(
 }
 
 function reconstructPath(
-  parent: Map<string, string>,
-  positions: Map<string, GridPosition>,
-  startKey: string,
-  targetKey: string,
+  parent: Map<number, number>,
+  positions: Map<number, GridPosition>,
+  startKey: number,
+  targetKey: number,
 ): GridPosition[] {
   const reversed: GridPosition[] = [];
   let currentKey = targetKey;
@@ -176,7 +180,7 @@ function reconstructPath(
     const position = positions.get(currentKey);
     const previousKey = parent.get(currentKey);
 
-    if (!position || !previousKey) {
+    if (!position || previousKey === undefined) {
       return [];
     }
 

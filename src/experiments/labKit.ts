@@ -9,6 +9,11 @@ import type {
   SimulationState,
 } from "../simulation/models/types";
 import { cloneConfig } from "../simulation/scenarios/presets";
+import {
+  chooseWorkerCount,
+  isWorkerPoolSupported,
+  runWithWorkerPool,
+} from "./labPool";
 
 export type FactorGroup =
   | "Warehouse"
@@ -130,7 +135,7 @@ export const FACTOR_REGISTRY: FactorDef[] = [
     type: "number",
     defaultValues: [6, 10, 14, 18, 22],
     min: 1,
-    max: 80,
+    max: 500,
     step: 1,
   },
   {
@@ -377,44 +382,129 @@ export const FACTOR_REGISTRY: FactorDef[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Confound rules — when factor X is varied, these factors MUST stay fixed
-// (single value, context role) otherwise gains can't be attributed to one cause.
+// Confound rules — when factor X and one of its linked factors both vary, the
+// Lab shows an advisory because the measured effect becomes an interaction.
+// These rules do not mutate the plan: interaction studies remain possible.
 // ---------------------------------------------------------------------------
 
 export interface ConfoundRule {
-  /** Factor whose variation triggers the lock. */
+  /** Factor whose variation triggers the advisory. */
   trigger: string;
-  /** Factors that get forced into "context" with a single value while trigger varies. */
+  /** Factors that should stay fixed when the trigger is studied in isolation. */
   lock: string[];
   /** Plain-language explanation shown in the banner / tooltip. */
   why: string;
+}
+
+export interface ConfoundWarning {
+  rule: ConfoundRule;
+  triggerLabel: string;
 }
 
 export const CONFOUND_RULES: ConfoundRule[] = [
   {
     trigger: "storageStrategy",
     lock: ["demandPattern"],
-    why: "Pour isoler l'effet d'une stratégie de stockage, le profil de demande doit rester constant.",
+    why: "Le stockage ABC dépend de la distribution SKU ; garde le profil de demande fixe pour isoler le placement.",
   },
   {
     trigger: "demandPattern",
-    lock: ["ordersPerMinute"],
-    why: "Pour mesurer l'effet d'un profil de demande, fixe l'intensité globale.",
+    lock: ["storageStrategy", "ordersPerMinute", "peakProfile", "urgentOrderRate"],
+    why: "Le profil de demande mesure le mix SKU ; garde stockage, cadence, pics et urgences fixes pour lire cet effet seul.",
   },
   {
     trigger: "ordersPerMinute",
-    lock: ["peakProfile"],
-    why: "Faire varier la cadence ET le profil de pic mélange régime stationnaire et surcharge transitoire.",
+    lock: ["demandPattern", "peakProfile", "urgentOrderRate"],
+    why: "La cadence mesure l'intensité globale ; garde le mix SKU, les pics et les urgences fixes.",
+  },
+  {
+    trigger: "peakProfile",
+    lock: ["ordersPerMinute", "demandPattern", "urgentOrderRate"],
+    why: "Le profil de pic mesure une surcharge temporelle ; garde cadence, mix SKU et urgences fixes.",
+  },
+  {
+    trigger: "urgentOrderRate",
+    lock: ["ordersPerMinute", "demandPattern", "peakProfile"],
+    why: "La part d'urgents change la priorité de service ; garde intensité, mix SKU et pics fixes.",
   },
   {
     trigger: "robotCount",
-    lock: ["chargingStationCount"],
-    why: "Pour trouver le R* optimal, garde le nombre de chargeurs fixe — sinon le palier de saturation se déplace pour deux raisons.",
+    lock: ["chargingStationCount", "pathfindingStrategy", "reroutingPolicy"],
+    why: "L'effet flotte dépend de la charge disponible et de la coordination ; garde ces paramètres fixes pour trouver R*.",
+  },
+  {
+    trigger: "chargingStationCount",
+    lock: [
+      "robotCount",
+      "maxBattery",
+      "rechargeThreshold",
+      "rechargeTicks",
+      "energyPerCell",
+      "payloadKg",
+    ],
+    why: "Les chargeurs mesurent l'infrastructure énergie ; garde flotte, autonomie, recharge et masse fixes.",
+  },
+  {
+    trigger: "maxBattery",
+    lock: [
+      "chargingStationCount",
+      "rechargeThreshold",
+      "rechargeTicks",
+      "energyPerCell",
+      "payloadKg",
+      "robotCount",
+    ],
+    why: "L'autonomie change aussi le poids batterie ; garde recharge, consommation, charge utile, chargeurs et flotte fixes.",
+  },
+  {
+    trigger: "rechargeThreshold",
+    lock: ["maxBattery", "chargingStationCount", "rechargeTicks", "energyPerCell", "payloadKg"],
+    why: "Le seuil de recharge est une politique batterie ; garde autonomie, chargeurs, vitesse de charge et consommation fixes.",
+  },
+  {
+    trigger: "rechargeTicks",
+    lock: ["maxBattery", "chargingStationCount", "rechargeThreshold"],
+    why: "La vitesse de recharge se lit à autonomie, seuil et nombre de chargeurs constants.",
+  },
+  {
+    trigger: "energyPerCell",
+    lock: ["payloadKg", "maxBattery", "chargingStationCount"],
+    why: "La consommation par cellule se mélange avec la masse transportée, l'autonomie et la capacité de charge.",
+  },
+  {
+    trigger: "payloadKg",
+    lock: ["energyPerCell", "maxBattery", "chargingStationCount"],
+    why: "La charge utile modifie la masse et donc l'énergie ; garde consommation, autonomie et chargeurs fixes.",
   },
   {
     trigger: "warehouseSize",
     lock: ["crossAisleSpacing", "levelCount", "pickingStationCount"],
-    why: "Comparer plusieurs tailles d'entrepôt change déjà énormément la géométrie ; fixe les autres paramètres structurels.",
+    why: "La taille change la surface et les lignes verticales ; garde niveaux, passages et stations fixes pour isoler la géométrie.",
+  },
+  {
+    trigger: "levelCount",
+    lock: ["warehouseSize", "crossAisleSpacing", "pickingStationCount"],
+    why: "Les niveaux mesurent l'effet vertical ; garde surface, passages et stations fixes.",
+  },
+  {
+    trigger: "pickingStationCount",
+    lock: ["warehouseSize", "levelCount", "crossAisleSpacing"],
+    why: "Les stations changent la capacité de sortie ; garde surface, hauteur et passages fixes.",
+  },
+  {
+    trigger: "crossAisleSpacing",
+    lock: ["warehouseSize", "levelCount", "pickingStationCount"],
+    why: "Les passages changent la connectivité interne ; garde surface, hauteur et stations fixes.",
+  },
+  {
+    trigger: "pathfindingStrategy",
+    lock: ["reroutingPolicy", "robotCount"],
+    why: "Le pathfinding dépend du niveau de congestion et de la fréquence de recalcul ; garde flotte et re-routage fixes.",
+  },
+  {
+    trigger: "reroutingPolicy",
+    lock: ["pathfindingStrategy", "robotCount"],
+    why: "Le re-routage dépend de l'algorithme de chemin et de la densité robots ; garde ces paramètres fixes.",
   },
 ];
 
@@ -422,19 +512,22 @@ export const CONFOUND_RULES: ConfoundRule[] = [
  *  given the current plan, plus the rules that triggered each lock. */
 export function computeLockedFactors(
   plan: LabPlan,
-): Map<string, { rule: ConfoundRule; triggerLabel: string }> {
-  const locked = new Map<string, { rule: ConfoundRule; triggerLabel: string }>();
+): Map<string, ConfoundWarning[]> {
+  const locked = new Map<string, ConfoundWarning[]>();
   const bindings = new Map(plan.bindings.map((b) => [b.factorId, b]));
+  const isVaried = (factorId: string): boolean => {
+    const role = plan.factorRoles?.[factorId] ?? "variable";
+    const values = bindings.get(factorId)?.values ?? [];
+    return role === "variable" && values.length > 1;
+  };
   for (const rule of CONFOUND_RULES) {
-    const triggerRole = plan.factorRoles?.[rule.trigger] ?? "variable";
-    const triggerValues = bindings.get(rule.trigger)?.values ?? [];
-    const isVaried = triggerRole === "variable" && triggerValues.length > 1;
-    if (!isVaried) continue;
+    if (!isVaried(rule.trigger)) continue;
     const triggerLabel = getFactorById(rule.trigger)?.label ?? rule.trigger;
     for (const lockedId of rule.lock) {
-      if (!locked.has(lockedId)) {
-        locked.set(lockedId, { rule, triggerLabel });
-      }
+      if (!isVaried(lockedId)) continue;
+      const warnings = locked.get(lockedId) ?? [];
+      warnings.push({ rule, triggerLabel });
+      locked.set(lockedId, warnings);
     }
   }
   return locked;
@@ -526,18 +619,19 @@ export const METRIC_COLUMNS: Array<{
   group?: MetricGroup;
 }> = [
   { id: "derivedMaxBattery", label: "Capacité batterie (dérivée)", unit: "énergie", structural: true },
-  { id: "effectiveRackCount", label: "Emplacements de stockage", unit: "racks", structural: true, essential: true, group: "Stockage" },
+  { id: "effectiveRackCount", label: "Emplacements de stockage", unit: "racks", structural: true, group: "Stockage" },
   { id: "rackDensityPct", label: "Densité de stockage", unit: "%", structural: true },
   { id: "warehouseWidth", label: "Largeur réelle", unit: "cellules", structural: true },
   { id: "warehouseHeight", label: "Profondeur réelle", unit: "cellules", structural: true },
   { id: "steadyThroughputPerMinute", label: "Débit", unit: "caisses/min", essential: true, group: "Performance" },
   { id: "throughputPerMinute", label: "Débit instantané (60s)", unit: "caisses/min" },
-  { id: "demandPerMinute", label: "Demande", unit: "caisses/min" },
+  { id: "demandPerMinute", label: "Demande", unit: "caisses/min", essential: true, group: "Performance" },
   { id: "feasibilityMargin", label: "Marge de capacité", unit: "ratio", essential: true, group: "Performance" },
   { id: "steadyUtilization", label: "Utilisation steady-state", unit: "ratio" },
   { id: "steadyBacklog", label: "Backlog moyen", unit: "commandes", essential: true, group: "Performance" },
+  { id: "backlogGrowthPerMinute", label: "Croissance backlog", unit: "cmd/min", essential: true, group: "Performance" },
   { id: "serviceLevel", label: "Taux de service", unit: "%", essential: true, group: "Performance" },
-  { id: "throughputPerRobot", label: "Débit / robot", unit: "caisses/min/robot", essential: true, group: "Performance" },
+  { id: "throughputPerRobot", label: "Débit / robot", unit: "caisses/min/robot", essential: true, group: "Efficacité" },
   { id: "backlogRatio", label: "Ratio backlog" },
   { id: "effectiveRobotCount", label: "Parc effectif", unit: "robots", structural: true },
   { id: "costProxy", label: "Coût (indicatif)", unit: "unités", essential: true, group: "Coût" },
@@ -557,7 +651,7 @@ export const METRIC_COLUMNS: Array<{
   { id: "depletionEvents", label: "Pannes batterie", essential: true, group: "Batterie" },
   { id: "averageBatteryLevel", label: "Batterie moyenne" },
   { id: "minimumBatteryLevel", label: "Batterie min" },
-  { id: "slottingEfficiency", label: "Qualité du rangement", essential: true, group: "Stockage" },
+  { id: "slottingEfficiency", label: "Qualité du rangement", group: "Stockage" },
   { id: "demandWeightedStorageDistance", label: "Distance pondérée" },
   { id: "fastMovingStorageDistance", label: "Distance SKU rapides" },
   { id: "elevatorTrips", label: "Trajets verticaux" },
@@ -750,117 +844,223 @@ export function countPlanRuns(plan: LabPlan): number {
   return countPlanCombinations(plan) * seeds;
 }
 
-export async function runLab({
-  baseConfig,
-  plan,
-  onProgress,
-}: LabRunOptions): Promise<RunPoint[]> {
-  const bindings = getActiveFactorBindings(plan);
+// Reporting progress + yielding after every single run forces one React
+// re-render + repaint per run, which dwarfs the ~20 ms of actual compute.
+// Throttle both to ~60 ms wall-clock so the UI stays responsive without paying
+// a render tax on every run.
+const PROGRESS_INTERVAL_MS = 60;
+
+/** Resolved run dimensions shared by the parallel and sequential paths. */
+function resolveRunDimensions(
+  baseConfig: SimulationConfig,
+  plan: LabPlan,
+): {
+  combinations: CombinationEntry[][];
+  seedCount: number;
+  ticksPerRun: number;
+  warmupSeconds: number;
+  totalRuns: number;
+} {
   const combinations = enumerateCombinations(getRunFactorBindings(plan));
   const seedCount = Math.max(MIN_SEEDS, Math.min(plan.seedCount, MAX_SEEDS));
   const ticksPerRun = Math.max(
     120,
     Math.round((plan.simulatedMinutes * 60) / baseConfig.tickDurationSeconds),
   );
-  const points: RunPoint[] = [];
-  const totalRuns = combinations.length * seedCount;
-  let completed = 0;
-  // The loop runs on the main thread. Reporting progress + yielding after every
-  // single run forced one React re-render + repaint per run, which dwarfed the
-  // ~20 ms of actual compute (the engine alone does ~50 runs/s). Throttle both
-  // to ~60 ms wall-clock so the UI stays responsive without paying a render tax
-  // on every run.
-  const PROGRESS_INTERVAL_MS = 60;
-  let lastTick = performance.now();
+  return {
+    combinations,
+    seedCount,
+    ticksPerRun,
+    warmupSeconds: plan.warmupMinutes * 60,
+    totalRuns: combinations.length * seedCount,
+  };
+}
+
+export async function runLab({
+  baseConfig,
+  plan,
+  onProgress,
+}: LabRunOptions): Promise<RunPoint[]> {
+  const { combinations, seedCount, ticksPerRun, warmupSeconds, totalRuns } =
+    resolveRunDimensions(baseConfig, plan);
   onProgress?.({ completedRuns: 0, totalRuns, currentLabel: "Démarrage…" });
+
+  // Runs are independent (each carries its own frozen seeds), so the sweep is
+  // embarrassingly parallel. Fan it out across a worker pool when available;
+  // fall back to a single-threaded sweep under SSR / test runners.
+  if (!isWorkerPoolSupported() || totalRuns === 0) {
+    return runLabSequential(
+      baseConfig,
+      combinations,
+      seedCount,
+      ticksPerRun,
+      warmupSeconds,
+      totalRuns,
+      onProgress,
+    );
+  }
+
+  // Pre-size by global index so out-of-order completion still rebuilds the exact
+  // sequential order — keeps output byte-identical to the single-threaded path.
+  const points: RunPoint[] = new Array(totalRuns);
+  const workerCount = chooseWorkerCount(totalRuns);
+  // ~4 chunks per worker balances postMessage overhead against load-balancing.
+  const chunkSize = Math.max(
+    1,
+    Math.min(16, Math.ceil(totalRuns / (workerCount * 4))),
+  );
+  let completed = 0;
+  let lastTick = performance.now();
+
+  await runWithWorkerPool({
+    baseConfig,
+    combinations,
+    ticksPerRun,
+    warmupSeconds,
+    seedCount,
+    totalRuns,
+    workerCount,
+    chunkSize,
+    onResults: (entries) => {
+      for (const entry of entries) {
+        points[entry.i] = entry.point;
+      }
+      completed += entries.length;
+      const now = performance.now();
+      if (now - lastTick >= PROGRESS_INTERVAL_MS || completed === totalRuns) {
+        const last = entries[entries.length - 1];
+        onProgress?.({
+          completedRuns: completed,
+          totalRuns,
+          currentLabel: last ? last.point.id : "",
+        });
+        lastTick = now;
+      }
+    },
+  });
+
+  onProgress?.({ completedRuns: totalRuns, totalRuns, currentLabel: "Terminé" });
+  return points;
+}
+
+/** Single-threaded sweep, used as the fallback when Web Workers are unavailable
+ *  (SSR, Node test runners). Identical results to the pooled path. */
+async function runLabSequential(
+  baseConfig: SimulationConfig,
+  combinations: CombinationEntry[][],
+  seedCount: number,
+  ticksPerRun: number,
+  warmupSeconds: number,
+  totalRuns: number,
+  onProgress?: (progress: LabProgress) => void,
+): Promise<RunPoint[]> {
+  const points: RunPoint[] = [];
+  let completed = 0;
+  let lastTick = performance.now();
 
   for (const combination of combinations) {
     for (let seedIndex = 0; seedIndex < seedCount; seedIndex += 1) {
-      const config = applyCombination(baseConfig, combination, seedIndex);
-      const label = buildLabel(combination, seedIndex);
-
-      const engine = new SimulationEngine(config);
-      for (let tick = 0; tick < ticksPerRun; tick += 1) {
-        engine.tick();
-      }
-      const snapshot = engine.getSnapshot(false, 1);
-      const demand = getEffectiveCrateOrdersPerMinute(config.demand, 0);
-      const effectiveRackCount = snapshot.warehouse.racks.length;
-      const steady = computeSteadyState(
-        snapshot.metrics.series,
-        plan.warmupMinutes * 60,
-        config.robots.robotCount,
-      );
-      const metrics = flattenMetrics(
-        snapshot.metrics,
-        demand,
-        config.robots.maxBattery,
-        effectiveRackCount,
-        config.warehouse.width,
-        config.warehouse.height,
-        config.robots.robotCount,
-        config.warehouse.chargingStationCount,
-      );
-      // Feasibility judged on the stationary regime, not the noisy 60 s snapshot.
-      const feasibilityMargin =
-        demand > 0
-          ? (steady.steadyThroughputPerMinute - demand) / demand
-          : 0;
-      const point: RunPoint = {
-        id: `${label}-${seedIndex + 1}`,
+      const point = runSinglePoint(
+        baseConfig,
+        combination,
         seedIndex,
-        factors: Object.fromEntries(
-          combination.map((entry) => {
-            // Record the EFFECTIVE value the engine actually ran with (read back
-            // from the config after applyCombination), not the requested one.
-            // This matters when a value is silently adjusted — e.g. robotCount
-            // clamped to the floor-density cap — so charts and regression don't
-            // treat clamped duplicates as distinct levels. Compound factors keep
-            // their categorical value (warehouseSize="s", peakProfile="moderate").
-            const factor = getFactorById(entry.factorId);
-            if (factor && !factor.compound && factor.path !== "_compound") {
-              const effective = getByPath(config, factor.path);
-              if (effective !== undefined) {
-                return [entry.factorId, effective];
-              }
-            }
-            return [entry.factorId, entry.value];
-          }),
-        ),
-        metrics: {
-          ...metrics,
-          steadyThroughputPerMinute: steady.steadyThroughputPerMinute,
-          steadyUtilization: steady.steadyUtilization,
-          steadyBacklog: steady.steadyBacklog,
-          demandPerMinute: demand,
-          feasibilityMargin,
-        },
-        feasible: steady.steadyThroughputPerMinute >= demand * 0.98,
-        physicalSnapshot: capturePhysicalSnapshot(snapshot),
-        config,
-      };
+        ticksPerRun,
+        warmupSeconds,
+      );
       points.push(point);
       completed += 1;
 
-      // Only surface progress + hand control back to the browser every
-      // ~60 ms, not every run — that's what keeps the UI alive without one
-      // re-render/repaint per simulation.
       const now = performance.now();
       if (now - lastTick >= PROGRESS_INTERVAL_MS) {
-        onProgress?.({ completedRuns: completed, totalRuns, currentLabel: label });
+        onProgress?.({
+          completedRuns: completed,
+          totalRuns,
+          currentLabel: point.id,
+        });
         await yieldToBrowser();
         lastTick = now;
       }
     }
   }
 
-  onProgress?.({
-    completedRuns: totalRuns,
-    totalRuns,
-    currentLabel: "Terminé",
-  });
-
+  onProgress?.({ completedRuns: totalRuns, totalRuns, currentLabel: "Terminé" });
   return points;
+}
+
+/** Execute one simulation run (one factor combination at one seed) and collapse
+ *  it into a RunPoint. Pure and deterministic given (baseConfig, combination,
+ *  seedIndex), so it runs identically on the main thread or inside a worker. */
+export function runSinglePoint(
+  baseConfig: SimulationConfig,
+  combination: CombinationEntry[],
+  seedIndex: number,
+  ticksPerRun: number,
+  warmupSeconds: number,
+): RunPoint {
+  const config = applyCombination(baseConfig, combination, seedIndex);
+  const label = buildLabel(combination, seedIndex);
+
+  const engine = new SimulationEngine(config);
+  for (let tick = 0; tick < ticksPerRun; tick += 1) {
+    engine.tick();
+  }
+  const snapshot = engine.getSnapshot(false, 1);
+  const demand = getEffectiveCrateOrdersPerMinute(config.demand, 0);
+  const effectiveRackCount = snapshot.warehouse.racks.length;
+  const steady = computeSteadyState(
+    snapshot.metrics.series,
+    warmupSeconds,
+    config.robots.robotCount,
+  );
+  const metrics = flattenMetrics(
+    snapshot.metrics,
+    demand,
+    config.robots.maxBattery,
+    effectiveRackCount,
+    config.warehouse.width,
+    config.warehouse.height,
+    config.robots.robotCount,
+    config.warehouse.chargingStationCount,
+    snapshot.orders.length,
+  );
+  // Feasibility judged on the stationary regime, not the noisy 60 s snapshot.
+  const feasibilityMargin =
+    demand > 0 ? (steady.steadyThroughputPerMinute - demand) / demand : 0;
+
+  return {
+    id: `${label}-${seedIndex + 1}`,
+    seedIndex,
+    factors: Object.fromEntries(
+      combination.map((entry) => {
+        // Record the EFFECTIVE value the engine actually ran with (read back
+        // from the config after applyCombination), not the requested one.
+        // This matters when a value is silently adjusted — e.g. robotCount
+        // clamped to the floor-density cap — so charts and regression don't
+        // treat clamped duplicates as distinct levels. Compound factors keep
+        // their categorical value (warehouseSize="s", peakProfile="moderate").
+        const factor = getFactorById(entry.factorId);
+        if (factor && !factor.compound && factor.path !== "_compound") {
+          const effective = getByPath(config, factor.path);
+          if (effective !== undefined) {
+            return [entry.factorId, effective];
+          }
+        }
+        return [entry.factorId, entry.value];
+      }),
+    ),
+    metrics: {
+      ...metrics,
+      steadyThroughputPerMinute: steady.steadyThroughputPerMinute,
+      steadyUtilization: steady.steadyUtilization,
+      steadyBacklog: steady.steadyBacklog,
+      backlogGrowthPerMinute: steady.backlogGrowthPerMinute,
+      demandPerMinute: demand,
+      feasibilityMargin,
+    },
+    feasible: steady.steadyThroughputPerMinute >= demand * 0.98,
+    physicalSnapshot: capturePhysicalSnapshot(snapshot),
+    config,
+  };
 }
 
 function getFactorRole(plan: LabPlan, factorId: string): FactorRole {
@@ -876,7 +1076,7 @@ function getRunFactorBindings(plan: LabPlan): FactorBinding[] {
   });
 }
 
-interface CombinationEntry {
+export interface CombinationEntry {
   factorId: string;
   value: FactorValue;
 }
@@ -1024,6 +1224,8 @@ export interface SteadyStateMetrics {
   steadyUtilization: number;
   /** Mean pending backlog over the window (orders) - a Little's-law style signal. */
   steadyBacklog: number;
+  /** Slope of pending backlog over the same window (orders/min). Positive means unstable demand. */
+  backlogGrowthPerMinute: number;
   /** Warm-up actually discarded (seconds); may be clamped to fit the series. */
   warmupSecondsUsed: number;
 }
@@ -1042,6 +1244,7 @@ export function computeSteadyState(
       steadyThroughputPerMinute: only?.throughputPerMinute ?? 0,
       steadyUtilization: only?.averageRobotUtilization ?? 0,
       steadyBacklog: only?.pendingOrders ?? 0,
+      backlogGrowthPerMinute: 0,
       warmupSecondsUsed: 0,
     };
   }
@@ -1072,11 +1275,16 @@ export function computeSteadyState(
     window.reduce((sum, sample) => sum + sample.activeRobots, 0) / window.length;
   const meanBacklog =
     window.reduce((sum, sample) => sum + sample.pendingOrders, 0) / window.length;
+  const backlogGrowthPerMinute =
+    deltaSeconds > 0
+      ? ((last.pendingOrders - first.pendingOrders) / deltaSeconds) * 60
+      : 0;
 
   return {
     steadyThroughputPerMinute,
     steadyUtilization: meanActive / Math.max(1, robotCount),
     steadyBacklog: meanBacklog,
+    backlogGrowthPerMinute,
     warmupSecondsUsed: warmupUsed,
   };
 }
@@ -1090,11 +1298,13 @@ function flattenMetrics(
   warehouseHeight: number,
   effectiveRobotCount: number,
   chargingStationCount: number,
+  openOrderCount: number,
 ): Record<string, number> {
   const completed = Math.max(1, metrics.completedOrders);
-  // Order service level (fill rate): share of created orders actually fulfilled
-  // by the end of the run. The remainder is still sitting in the backlog.
-  const totalOrders = metrics.completedOrders + metrics.pendingOrders;
+  // Order service level (fill rate): share of created orders fulfilled by the
+  // end of the run. Open orders include pending, assigned, picking and in-transit
+  // work; counting only pending would inflate service when WIP is high.
+  const totalOrders = metrics.completedOrders + openOrderCount;
   const serviceLevel =
     totalOrders > 0 ? metrics.completedOrders / totalOrders : 1;
   return {
@@ -1192,22 +1402,25 @@ function yieldToBrowser(): Promise<void> {
   });
 }
 
-/** Metrics shown in comparison dropdowns: essential KPIs AND structural
- *  quantities that vary across the dataset (storage capacity, dimensions...).
- *  Structural metrics are useful as Y axes when the user compares geometry
- *  changes — they expose the design trade-off (e.g. more aisles = fewer racks).
- *  Falls back to the essential list when the dataset is empty. */
+/** Metrics shown in comparison dropdowns: core KPIs plus contextual diagnostics
+ *  that vary across the dataset. Storage capacity and slotting quality are not
+ *  operational performance KPIs, but they are useful as explanatory Y axes when
+ *  a layout or storage strategy sweep actually changes them. */
 export function getActiveMetricColumns(
   points: RunPoint[],
 ): typeof METRIC_COLUMNS {
-  const essentials = METRIC_COLUMNS.filter((col) => col.essential);
+  const core = METRIC_COLUMNS.filter((col) => col.essential && !col.structural);
   if (points.length === 0) {
-    return essentials.filter((col) => !col.structural);
+    return core;
   }
-  return essentials.filter((col) => {
+  const varies = (col: (typeof METRIC_COLUMNS)[number]): boolean => {
     const first = points[0].metrics[col.id];
     return points.some((p) => p.metrics[col.id] !== first);
-  });
+  };
+  const contextual = METRIC_COLUMNS.filter(
+    (col) => !col.essential && col.group && varies(col),
+  );
+  return [...core.filter(varies), ...contextual];
 }
 
 export function getNumericColumns(): Array<{

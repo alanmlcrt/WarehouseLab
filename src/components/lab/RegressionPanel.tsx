@@ -19,11 +19,32 @@ import {
   type RunPoint,
 } from "../../experiments/labKit";
 import { olsRegression } from "../../experiments/labStats";
-import { getVaryingFactors } from "./analysis";
+import { getVaryingFactors, labelForFactor } from "./analysis";
 import { MetricSelect } from "./metrics";
 
 interface RegressionPanelProps {
   points: RunPoint[];
+}
+
+/** Turn a coefficient id into plain French. Numeric factors → their label;
+ *  categorical dummies "factorId=level" → "Label = level". */
+function humanizeCoef(id: string): string {
+  const eq = id.indexOf("=");
+  if (eq === -1) {
+    return labelForFactor(id);
+  }
+  return `${labelForFactor(id.slice(0, eq))} = ${id.slice(eq + 1)}`;
+}
+
+type EffectForce = "négligeable" | "faible" | "moyen" | "fort";
+
+/** Qualitative band for a standardized coefficient (comparable across factors). */
+function effectForce(standardized: number): EffectForce {
+  const v = Math.abs(standardized);
+  if (v < 0.1) return "négligeable";
+  if (v < 0.3) return "faible";
+  if (v < 0.5) return "moyen";
+  return "fort";
 }
 
 export function RegressionPanel({ points }: RegressionPanelProps) {
@@ -168,13 +189,68 @@ export function RegressionPanel({ points }: RegressionPanelProps) {
       .sort((a, b) => Math.abs(b.standardized) - Math.abs(a.standardized))
       .map((coefficient) => ({
         id: coefficient.id,
+        label: humanizeCoef(coefficient.id),
         raw: coefficient.raw,
         standardized: coefficient.standardized,
       }));
   }, [fit]);
 
+  // Plain-language verdict: what the regression actually says, for a reader who
+  // doesn't know what R² or a standardized coefficient is.
+  const reading = useMemo(() => {
+    if (!fit) {
+      return null;
+    }
+    const targetLabel =
+      activeMetrics.find((metric) => metric.id === target.id)?.label ?? target.id;
+    const pct = Math.round(Math.max(0, fit.result.rSquared) * 100);
+    const quality =
+      pct >= 80 ? "très bien" : pct >= 50 ? "correctement" : pct >= 25 ? "en partie" : "mal";
+    const drivers = fit.result.coefficients
+      .filter((c) => effectForce(c.standardized) !== "négligeable")
+      .sort((a, b) => Math.abs(b.standardized) - Math.abs(a.standardized))
+      .slice(0, 4)
+      .map((c) => ({
+        name: humanizeCoef(c.id),
+        up: c.standardized >= 0,
+        force: effectForce(c.standardized),
+      }));
+    return { targetLabel, pct, quality, drivers };
+  }, [fit, activeMetrics, target]);
+
   return (
-    <div className="grid h-full min-h-0 grid-cols-[280px_minmax(0,1fr)] gap-3">
+    <div className="flex h-full min-h-0 flex-col gap-3">
+      {reading ? (
+        <div className="rounded-md border border-accent/30 bg-accent/5 p-3 text-sm">
+          <p className="text-slate-700">
+            En combinant les paramètres variés, on explique{" "}
+            <b className="text-ink">{reading.pct}%</b> de la variation de{" "}
+            <b className="text-ink">{reading.targetLabel}</b> — ce test la décrit{" "}
+            {reading.quality}.
+          </p>
+          {reading.drivers.length > 0 ? (
+            <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+              {reading.drivers.map((driver) => (
+                <li className="flex items-center gap-1.5" key={driver.name}>
+                  <span className={driver.up ? "text-emerald-600" : "text-red-600"}>
+                    {driver.up ? "▲" : "▼"}
+                  </span>
+                  <span className="text-slate-700">
+                    <b>{driver.name}</b> {driver.up ? "augmente" : "réduit"}{" "}
+                    {reading.targetLabel}{" "}
+                    <span className="text-slate-400">(effet {driver.force})</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-1 text-slate-500">
+              Aucun paramètre n'a d'effet marqué sur cette métrique dans ce test.
+            </p>
+          )}
+        </div>
+      ) : null}
+      <div className="grid min-h-0 flex-1 grid-cols-[280px_minmax(0,1fr)] gap-3">
       <div className="flex min-h-0 flex-col gap-3 overflow-y-auto rounded-md border border-line bg-white p-3 shadow-sm">
         <div className="flex flex-col gap-1">
           <span className="text-[11px] uppercase tracking-[0.1em] text-slate-500">
@@ -187,13 +263,16 @@ export function RegressionPanel({ points }: RegressionPanelProps) {
             value={target.id}
           />
         </div>
-        <label className="flex items-center gap-2 text-xs">
+        <label
+          className="flex items-center gap-2 text-xs"
+          title="Étudie les effets en pourcentage plutôt qu'en valeur absolue — utile pour les lois d'échelle (ex. robots → débit)."
+        >
           <input
             checked={useLog}
             onChange={(event) => setUseLog(event.target.checked)}
             type="checkbox"
           />
-          Transformation log-log
+          Effets en % (log-log)
         </label>
         <div>
           <div className="text-[11px] uppercase tracking-[0.1em] text-slate-500">
@@ -281,14 +360,19 @@ export function RegressionPanel({ points }: RegressionPanelProps) {
         </div>
       </div>
       <div className="grid min-h-0 grid-rows-2 gap-3">
-        <div className="min-h-0 rounded-md border border-line bg-white p-3 shadow-sm">
+        <div className="flex min-h-0 flex-col rounded-md border border-line bg-white p-3 shadow-sm">
           <div className="text-[11px] uppercase tracking-[0.1em] text-slate-500">
-            Coefficients standardisés
+            Poids de chaque paramètre
           </div>
+          <p className="mb-1 text-[11px] text-slate-400">
+            Barre vers la droite = augmente le résultat, vers la gauche = le diminue.
+            Plus elle est longue, plus l'effet est fort.
+          </p>
+          <div className="min-h-0 flex-1">
           {coefficientData.length === 0 ? (
             <Empty />
           ) : (
-            <ResponsiveContainer height="92%" width="100%">
+            <ResponsiveContainer height="100%" width="100%">
               <BarChart
                 data={coefficientData}
                 layout="vertical"
@@ -301,7 +385,7 @@ export function RegressionPanel({ points }: RegressionPanelProps) {
                   type="number"
                 />
                 <YAxis
-                  dataKey="id"
+                  dataKey="label"
                   stroke="#64748b"
                   tick={{ fontSize: 10, fill: "#475569" }}
                   type="category"
@@ -323,15 +407,21 @@ export function RegressionPanel({ points }: RegressionPanelProps) {
               </BarChart>
             </ResponsiveContainer>
           )}
-        </div>
-        <div className="min-h-0 rounded-md border border-line bg-white p-3 shadow-sm">
-          <div className="text-[11px] uppercase tracking-[0.1em] text-slate-500">
-            Prédit vs observé
           </div>
+        </div>
+        <div className="flex min-h-0 flex-col rounded-md border border-line bg-white p-3 shadow-sm">
+          <div className="text-[11px] uppercase tracking-[0.1em] text-slate-500">
+            Qualité des prédictions
+          </div>
+          <p className="mb-1 text-[11px] text-slate-400">
+            Chaque point = une config. Plus les points serrent une diagonale, mieux
+            le modèle prédit le résultat.
+          </p>
+          <div className="min-h-0 flex-1">
           {observedVsPredicted.length === 0 ? (
             <Empty />
           ) : (
-            <ResponsiveContainer height="92%" width="100%">
+            <ResponsiveContainer height="100%" width="100%">
               <ScatterChart margin={{ bottom: 24, left: 12, right: 16, top: 8 }}>
                 <CartesianGrid stroke="#dbe6f2" strokeDasharray="4 4" />
                 <XAxis
@@ -373,7 +463,9 @@ export function RegressionPanel({ points }: RegressionPanelProps) {
               </ScatterChart>
             </ResponsiveContainer>
           )}
+          </div>
         </div>
+      </div>
       </div>
     </div>
   );

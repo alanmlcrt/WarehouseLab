@@ -29,6 +29,7 @@ import {
 } from "../../experiments/labStats";
 import { sortLevels } from "./explorer/explorerModel";
 import { MetricSelect } from "./metrics";
+import { Verdict } from "./Verdict";
 
 interface StatTestsPanelProps {
   points: RunPoint[];
@@ -140,8 +141,20 @@ export function StatTestsPanel({ points }: StatTestsPanelProps) {
 
   const metricLabel =
     METRIC_COLUMNS.find((column) => column.id === metricId)?.label ?? metricId;
+  const factorLabel = getFactorById(activeFactorId)?.label ?? activeFactorId;
   const test = analysis?.test ?? null;
   const epsMagnitude = test ? interpretEpsilonSquared(test.epsilonSquared) : null;
+
+  // One-sentence reading of the test for a non-statistician.
+  const effects = analysis?.mainEffects ?? [];
+  const bestLevel =
+    effects.length > 0
+      ? effects.reduce((a, b) => (b.mean > a.mean ? b : a))
+      : null;
+  const worstLevel =
+    effects.length > 0
+      ? effects.reduce((a, b) => (b.mean < a.mean ? b : a))
+      : null;
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-auto">
@@ -166,6 +179,33 @@ export function StatTestsPanel({ points }: StatTestsPanelProps) {
           value={metricId}
         />
       </div>
+
+      {test ? (
+        <Verdict>
+          {test.pValue < 0.05 ? (
+            <>
+              <b className="text-ink">{factorLabel}</b> a un effet{" "}
+              <b className="text-emerald-700">statistiquement net</b> sur{" "}
+              <b className="text-ink">{metricLabel}</b> (ampleur {epsMagnitude}, p
+              {test.pValue < 0.0001 ? " < 0.0001" : ` = ${test.pValue.toFixed(3)}`}).
+              {bestLevel && worstLevel && bestLevel.level !== worstLevel.level ? (
+                <>
+                  {" "}Le niveau <b>{bestLevel.level}</b> donne la valeur la plus
+                  haute ({fmt(bestLevel.mean)}), <b>{worstLevel.level}</b> la plus
+                  basse ({fmt(worstLevel.mean)}).
+                </>
+              ) : null}
+            </>
+          ) : (
+            <>
+              Pas de différence nette de <b className="text-ink">{metricLabel}</b>{" "}
+              selon <b className="text-ink">{factorLabel}</b> (p ={" "}
+              {test.pValue.toFixed(3)}) : l'écart observé peut venir du hasard des
+              seeds, pas du paramètre.
+            </>
+          )}
+        </Verdict>
+      ) : null}
 
       {test && confoundingFactors.length > 0 ? (
         <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">

@@ -17,6 +17,7 @@ import {
 } from "../../experiments/labKit";
 import { paretoFront } from "../../experiments/labStats";
 import { getVaryingFactors } from "./analysis";
+import { Verdict } from "./Verdict";
 
 interface ParetoChartProps {
   points: RunPoint[];
@@ -123,6 +124,17 @@ export function ParetoChart({ points }: ParetoChartProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
+      {frontPoints.length > 0 ? (
+        <Verdict>
+          <b className="text-emerald-700">{frontPoints.length} config
+          {frontPoints.length > 1 ? "s" : ""}</b> (en vert) offre
+          {frontPoints.length > 1 ? "nt" : ""} le meilleur compromis : aucune
+          autre ne fait mieux à la fois sur <b className="text-ink">{xLabel?.label ?? x.id}</b>{" "}
+          et <b className="text-ink">{yLabel?.label ?? y.id}</b>. Les points gris
+          sont battus par au moins une verte — choisis ta config sur la ligne verte
+          selon le compromis voulu.
+        </Verdict>
+      ) : null}
       <div className="grid grid-cols-2 gap-3">
         <ObjectivePicker
           columns={columns}

@@ -66,6 +66,26 @@ Utilite: mesurer le backlog.
 
 Affichage: KPI dashboard et courbe.
 
+## Croissance Du Backlog
+
+Definition: pente du backlog moyen apres la periode de chauffe, exprimee en commandes/min.
+
+Formule: `(backlogFin - backlogDebut) / dureeFenetreMinutes`, sur la meme fenetre steady-state que le debit du Lab.
+
+Utilite: distinguer une file haute mais stable d'un systeme instable. Une valeur proche de 0 signifie que la file est stabilisee; une valeur positive indique que la demande arrive plus vite que le systeme ne livre; une valeur negative indique que le backlog se resorbe.
+
+Affichage: KPI Research Lab, dropdowns d'analyse, heatmaps et tests statistiques.
+
+## Taux De Service
+
+Definition: part des missions caisse creees qui sont terminees a la fin du run.
+
+Formule: `completedOrders / (completedOrders + openOrders)`, ou `openOrders` inclut les commandes encore en attente, assignees, en picking ou en transit.
+
+Utilite: mesurer la capacite du systeme a absorber la demande sur l'horizon simule. C'est un indicateur de satisfaction de service; il complete le debit et la croissance du backlog.
+
+Affichage: KPI Research Lab, dropdowns d'analyse, heatmaps et tests statistiques.
+
 ## Congestion
 
 Definition: nombre d'attentes causees par cellule occupee ou chemin bloque.

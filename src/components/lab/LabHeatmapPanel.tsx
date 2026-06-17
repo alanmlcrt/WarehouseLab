@@ -10,6 +10,7 @@ import { mean, standardDeviation } from "../../experiments/labStats";
 import { getVaryingFactors } from "./analysis";
 import { distinctValues, formatNumber, sortLevels } from "./explorer/explorerModel";
 import { MetricSelect } from "./metrics";
+import { Verdict } from "./Verdict";
 
 interface LabHeatmapPanelProps {
   points: RunPoint[];
@@ -76,8 +77,21 @@ export function LabHeatmapPanel({ points }: LabHeatmapPanelProps) {
     );
   }
 
+  const metricLabel =
+    metrics.find((metric) => metric.id === activeMetric)?.label ?? activeMetric;
+  const bestCell = model.sortedCells[0] ?? null;
+
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3">
+    <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-3">
+      {bestCell ? (
+        <Verdict>
+          Meilleur résultat pour <b className="text-ink">{metricLabel}</b> :{" "}
+          <b className="text-emerald-700">{formatNumber(bestCell.mean)}</b>, obtenu avec{" "}
+          <b className="text-ink">{xFactor.label} = {bestCell.x}</b> et{" "}
+          <b className="text-ink">{yFactor.label} = {bestCell.y}</b>. La couleur la
+          plus foncée repère cette zone dans la grille.
+        </Verdict>
+      ) : null}
       <div className="flex flex-wrap items-end gap-3 rounded-md border border-line bg-white p-3 shadow-sm">
         <FactorSelect
           factors={varying}
